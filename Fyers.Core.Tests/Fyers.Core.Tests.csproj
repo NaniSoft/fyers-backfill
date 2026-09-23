@@ -11,7 +11,7 @@
     <PackageReference Include="coverlet.collector" Version="6.0.4" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="xunit" Version="2.9.3" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="4.0.0" />
     <!-- xUnit v2 has no built-in dynamic skip (Assert.Skip is v3-only); the
          large-fixture parity tests need to skip on a clean checkout. -->
     <PackageReference Include="Xunit.SkippableFact" Version="1.4.13" />
