@@ -222,7 +222,7 @@ gdrive:
 # a separate account) and let daily_budget cap each run.
 # ---------------------------------------------------------------------------
 backfill:
-  root: /data                 # mounted file share; the dataset lands here
+  root: data/backfill          # dataset root; the container sets /data via FYERS_BACKFILL_ROOT
   from: "2017-07-03"          # documented 1-minute floor
   to: null                    # null = today (IST)
   chunk_days: 100             # Fyers caps minute resolutions at 100 days/request

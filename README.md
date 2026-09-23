@@ -104,7 +104,7 @@ is optional; the defaults are the sensible ones:
 
 ```yaml
 backfill:
-  root: /data                 # mounted file share
+  root: data/backfill         # dataset root; container overrides to /data
   from: "2017-07-03"          # documented 1-minute floor
   to: null                    # null = today (IST)
   chunk_days: 100             # Fyers caps minute resolutions at 100 days/request
