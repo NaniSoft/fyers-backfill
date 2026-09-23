@@ -39,8 +39,14 @@ if (cli.Command is null or "help" or "--help" or "-h")
 var repoRoot = cli.RepoRoot ?? TokenRunOptions.DetectRepoRoot();
 var configPath = cli.ConfigPath ?? Path.Combine(repoRoot, "config.yaml");
 var envPath = cli.EnvPath ?? Path.Combine(repoRoot, ".env");
-var dataDir = cli.DataDir ?? Path.Combine(repoRoot, "data");
-Directory.CreateDirectory(dataDir);
+// The token file is shared with the live collector when both mount the same
+// volume; in the container it defaults to the dataset root (/data) so `login`
+// and `backfill` — separate container runs — see the same token.
+var dataDir = cli.DataDir
+    ?? Environment.GetEnvironmentVariable("FYERS_DATA_DIR")
+    ?? (Environment.GetEnvironmentVariable("FYERS_BACKFILL_ROOT") is { Length: > 0 } r
+        ? r
+        : Path.Combine(repoRoot, "data"));
 
 var cfg = BackfillConfig.Load(configPath, envPath);
 var rootOverride = cli.Root ?? Environment.GetEnvironmentVariable("FYERS_BACKFILL_ROOT");
@@ -128,6 +134,7 @@ return report.AuthExpired ? 2 : 0;
 static async Task<int> LoginAsync(BackfillConfig cfg, string repoRoot, string dataDir,
     string tokenPath, ILogger log)
 {
+    Directory.CreateDirectory(dataDir);
     var redirect = cfg.Env.Get("FYERS_REDIRECT_URI") ?? TokenConfig.DefaultRedirectUri;
     var port = new Uri(redirect).Port;
     var bind = Environment.GetEnvironmentVariable("FYERS_BIND_URL")
