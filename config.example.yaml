@@ -1,0 +1,243 @@
+# Fyers per-minute index + constituent snapshot collector — configuration.
+# Copy this file to config.yaml and edit. Secrets live in .env, NOT here.
+
+# ---------------------------------------------------------------------------
+# Symbol universe — INDICES (option chain + futures + spot). These keep the
+# original index-only behavior; constituents are additive (see below).
+# ---------------------------------------------------------------------------
+symbols:
+  - underlying: NIFTY
+    chain_symbol: NSE:NIFTY50-INDEX      # option-chain underlying (Fyers v3)
+    spot_symbol: NSE:NIFTY50-INDEX       # cash/spot for the quotes batch
+    weekly: true                          # NIFTY has weekly expiries
+  - underlying: BANKNIFTY
+    chain_symbol: NSE:NIFTYBANK-INDEX
+    spot_symbol: NSE:NIFTYBANK-INDEX
+    weekly: false                         # BANKNIFTY is monthly-only (SEBI)
+
+# ---------------------------------------------------------------------------
+# Constituent stocks (extension — decisions 01/06). Sourced daily from the
+# NSE archive CSVs (bare tickers); F&O membership from the Fyers master. When
+# enabled, each minute also captures, per constituent: cash L1 quote + (if
+# F&O) 3 nearest monthly option expiries + 3 nearest futures L1 quotes.
+# ---------------------------------------------------------------------------
+constituents:
+  enabled: true
+  indices:                          # which NSE index lists to source + their tag
+    - name: "NIFTY 50"
+      csv: "https://archives.nseindia.com/content/indices/ind_nifty50list.csv"
+      fallback: "https://niftyindices.com/IndexConstituent/ind_nifty50list.csv"
+      tag: NIFTY50
+    - name: "NIFTY BANK"
+      csv: "https://archives.nseindia.com/content/indices/ind_niftybanklist.csv"
+      fallback: "https://niftyindices.com/IndexConstituent/ind_niftybanklist.csv"
+      tag: NIFTYBANK
+  stock_options:
+    n_monthly: 2                     # nearest monthly expiries (no weeklies — SEBI).
+                                     # 2 keeps 59 F&O constituents ~135/min under the
+                                     # 190 cap with margin; bump to 3 for far-month
+                                     # coverage (~193/min, tighter margin under 200).
+    strikecount: 50                  # ATM ± 25 per side
+    greeks: true
+  stock_futures:
+    n_months: 3                      # 3 nearest futures (L1, no OI)
+  quotes_chunk: 50                   # max symbols per /data/quotes call (URL-safe)
+
+# ---------------------------------------------------------------------------
+# Option chain — INDICES (decision 07/13/14)
+# ---------------------------------------------------------------------------
+options:
+  strikecount: 50          # ATM ± 25 strikes per side (~202 legs/index/expiry)
+  greeks: true             # request greeks=1 (delta/gamma/theta/vega/iv per leg)
+  n_weekly: 2              # nearest N weekly expiries (skipped if symbol.weekly=false)
+  n_monthly: 3             # nearest N monthly expiries (current + next two)
+  n_yearly: 2              # current-year Dec + next-year Dec
+
+# ---------------------------------------------------------------------------
+# Index futures (decision 13: current + next month)
+# ---------------------------------------------------------------------------
+futures:
+  n_months: 2              # current-month + next-month future per underlying
+
+# ---------------------------------------------------------------------------
+# Market session (decisions 05/16) — Asia/Kolkata (IST)
+#   quotes_start..quotes_end = the quotes envelope (cash/futures/spot/VIX).
+#   start..end               = the chains window (option chains run here only).
+# The scheduler derives three sub-windows from these four times:
+#   quotes_start..start       -> quotes_only
+#   start..end                 -> full (chains + quotes)
+#   end..quotes_end            -> quotes_only
+# ---------------------------------------------------------------------------
+session:
+  tz: Asia/Kolkata
+  quotes_start: "08:30"
+  start: "09:00"             # chains from 09:00 — covers the 09:00-09:08 CAS
+                             # pre-open auction; chain data there is partly
+                             # redundant/stale, accepted deliberately.
+                             # NSE continuous trading opens 09:15.
+  end: "16:00"               # full mode through the post-close window
+  quotes_end: "16:00"
+  premarket_times: ["08:45", "10:00"]   # yfinance global-cues fetches
+  eod_time: "15:31"                      # daily-summary computation (local)
+
+# ---------------------------------------------------------------------------
+# Storage (decisions 03/15). One SQLite file per trading day holds the raw
+# per-minute option_chain + quotes + snapshot_runs; a separate live summary.db
+# holds daily_summary + holidays + premarket_cues + the dated constituents
+# table. Prior days' raw files are VACUUM+WAL-checkpoint+xz-archived (never
+# deleted) once past retention.hot_days. The legacy snapshots.db is frozen
+# read-only.
+# ---------------------------------------------------------------------------
+storage:
+  daily_dir: data                 # daily files: <daily_dir>/snapshots-YYYYMMDD.db
+  summary_db: data/summary.db    # live summary DB
+  archive_dir: data/archive      # xz retention target
+  legacy_db: data/snapshots.db   # frozen read-only (index-only history)
+
+retention:
+  hot_days: 1                    # keep raw daily files hot this many days, then xz
+
+# ---------------------------------------------------------------------------
+# Rate limit (decision 04) — module-level token bucket wrapping every Fyers
+# data GET. Fyers caps: 10/s, 200/min, 100k/day. We run under at 8/s + 190/min.
+# ---------------------------------------------------------------------------
+rate_limit:
+  per_minute: 190
+  per_second: 8
+
+# ---------------------------------------------------------------------------
+# Post-close 1-minute OHLCV candles (Fyers /data/history) backfilled into each
+# day's raw db (candles_1m table) — one file per day holds snapshots AND
+# candles. Runs in-process once per trading day at candles.time, which MUST be
+# after quotes_end: the Fyers quota is one global pool (10/s, 200/min,
+# 100k/day; >3 per-minute breaches/day = blocked until midnight) and the
+# snapshot envelope owns it until 16:00. Expired F&O contracts get no history,
+# so this job is zero-loss-critical: failures alert and self-heal via
+# lookback_days catch-up.
+#
+# REAL COST (measured 2026-08-28): candles are fetched with ONE /data/history
+# call per symbol — there is no batching endpoint — and a production day holds
+# ~18,238 distinct symbols (17,995 option legs: 59 F&O underlyings x 50
+# strikes x 2 monthly expiries, plus 2 index chains x 7 expiries; + 243 quote
+# symbols). At the 190/min cap that is ~96 minutes of fetch time per full day.
+# So: steady state is one evening per trading day; after an outage the budget
+# converges a few days per night, and budget_min caps each run.
+# ---------------------------------------------------------------------------
+candles:
+  enabled: true
+  time: "21:00"          # IST; must be later than quotes_end (refused at startup otherwise).
+                         # 21:00, not 17:00: derivative candle publication lags the close
+                         # (found live 2026-09-07 — legs still absent at 17:00, served by
+                         # 19:10), so an early slot false-negatives the probe and drops
+                         # the day's legs.
+  lookback_days: 6       # catch-up window (idempotent INSERT OR REPLACE); days whose
+                         # last run reported 0 failures are skipped via the
+                         # candles_runs marker in summary.db — never re-archived
+  budget_min: 120        # wall-clock minutes one run may spend fetching (~96 min for a
+                         # full day at 190/min). Convergence is budget-driven, NOT a
+                         # pass count: the limiter skips instantly once its 60s window
+                         # fills, so only elapsed time makes progress. Whatever is still
+                         # pending at expiry is reported as failed and healed by the
+                         # next run, which resumes from the rows already on disk.
+  probe_retry_min: 10    # wait before a second derivative-probe pass when the first
+                         # came back all-empty (0 = single pass). Belt-and-braces for
+                         # slow publication days; 0 costs the wait before the budget
+                         # clock starts, so it never steals fetch time.
+  retries: 2             # superseded by budget_min (kept so older config files load);
+                         # no longer drives retry passes
+
+# ---------------------------------------------------------------------------
+# Resilience (NFR) — autorestart supervisor around the scheduler loop.
+# ---------------------------------------------------------------------------
+resilience:
+  max_restarts: 12                # max scheduler restarts per run before giving up
+  restart_backoff_sec: 15         # sleep between restarts (doubles up to 5x)
+
+# ---------------------------------------------------------------------------
+# NSE trading holidays (decision 16). Add YYYY-MM-DD dates here to override/
+# extend the built-in list in src/market_calendar.py. Weekends are auto-skipped.
+# ---------------------------------------------------------------------------
+holidays:
+  dates: []
+
+# ---------------------------------------------------------------------------
+# Auth (containerization tickets 01/02/04). Two modes:
+#   legacy   — in-process headless browser re-login (pre-k8s; retired once the
+#              collector runs as a container — no browser in there).
+#   callback — the token service owns login: it Telegrams a Fyers login URL
+#              when the token file is missing/expired; the user clicks and
+#              logs in on Fyers' own page (client ID / TOTP / PIN / Turnstile
+#              are human-solved there); Fyers redirects to
+#              <callback_base_url>/callback, where the service exchanges the
+#              auth_code (TTL ≈ 2 min) and writes token_file. One click/day
+#              IS the design — the refresh-token flow is regulatory-dead
+#              (April 2026, daily 2FA mandatory).
+# ---------------------------------------------------------------------------
+auth:
+  mode: "callback"             # legacy | callback (k8s token-service mode)
+  token_file: "data/fyers_access_token.json"  # collector + token service share this one path (k8s PVC root = data/)
+  callback_base_url: "http://127.0.0.1:8001"  # user's browser hits this; + /callback must byte-match the
+                                              # redirect URI registered on the Fyers app (no query string —
+                                              # a mismatch bounces silently to the login page). VPS overlay:
+                                              # http://<vps-ip>:8001 on a second Non-trading app.
+  prompt_time: "06:30"         # IST; daily login prompt (token death ≈ 06:00 — never prompt 00:00–06:00)
+  remind_interval_min: 60      # re-mind while a login is still pending
+  watch_interval_sec: 60       # token-file health check cadence
+  auth_time: "08:00"           # IST; legacy-mode daily proactive re-auth slot
+  selectors:                   # legacy only — Fyers web login, mapped live 2026-08-29 (docs/auth-flow.md).
+                               # No password field exists: client ID -> TOTP -> PIN.
+                               # If login starts failing, re-run research/auth_spike.py.
+    login_type_client: "#clientId_rb"  # "Client ID" login-type radio
+    login_id: "#fy_client_id:visible"  # Client ID input (:visible — SPA pre-renders hidden duplicates)
+    login_id_submit: "#clientIdSubmit" # submit after client ID
+    totp_boxes: ".otp-field:visible"   # 6 separate TOTP digit boxes
+    totp_submit: "#confirmOtpSubmit:visible"
+    pin_boxes: ".pin-field:visible"    # 4 separate PIN digit boxes
+    pin_submit: "#verifyPinSubmit:visible"
+
+# ---------------------------------------------------------------------------
+# Notifications (VPS feature). Telegram hourly rollup + missed-minute alert.
+# ---------------------------------------------------------------------------
+notify:
+  hourly_rollup: true
+  missed_min_alert: 3          # alert after N consecutive missed minutes
+
+# ---------------------------------------------------------------------------
+# Google Drive backup (VPS feature). rclone pushes the daily archive to Drive.
+# ---------------------------------------------------------------------------
+gdrive:
+  enabled: true
+  remote: gdrive               # rclone remote name
+  path: fyers-snapshots        # folder on Drive
+# ---------------------------------------------------------------------------
+# Historical 1-minute OHLCV backfill (Fyers /data/history + the expired-F&O
+# endpoints). This section drives the SEPARATE fyers-backfill image, which the
+# user runs locally against a mounted file share; it writes one Parquet file per
+# (resolution, instrument) under <root>/<resolution>/<SYMBOL>.parquet. The live
+# collector ignores this section entirely.
+#
+# Fyers limits are GLOBAL to the account: 10/s, 200/min, 100,000/day, and >3
+# per-minute breaches in a day blocks the account until midnight. The live
+# collector shares that pool, so keep the backfill outside market hours (or use
+# a separate account) and let daily_budget cap each run.
+# ---------------------------------------------------------------------------
+backfill:
+  root: /data                 # mounted file share; the dataset lands here
+  from: "2017-07-03"          # documented 1-minute floor
+  to: null                    # null = today (IST)
+  chunk_days: 100             # Fyers caps minute resolutions at 100 days/request
+  resolutions: ["1"]          # "1" = 1-minute; add "D" for daily candles
+  include_oi: true            # oi_flag / include_oi for derivatives
+  daily_budget: 90000         # max requests per run (the account pool is 100k/day)
+  max_minutes: 0              # wall-clock cap per run (0 = unlimited)
+  market_hours_only: false    # true = refuse to run 09:15-15:30 IST
+  rate_limit:
+    per_minute: 190
+    per_second: 8
+  universe:
+    equities: true            # every NSE cash equity (NSE_CM master)
+    futures: true             # live futures (NSE_FO master)
+    options: true             # live options (NSE_FO master)
+    expired: true             # expired F&O via /data/history/fno/expired/*
+    underlyings: []           # [] = all; else stems, e.g. [NIFTY, BANKNIFTY, RELIANCE]
+  master_cache_dir: null      # default <root>/_masters

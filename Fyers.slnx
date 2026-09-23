@@ -1,0 +1,9 @@
+<Solution>
+  <Project Path="Fyers.Backfill.Tests/Fyers.Backfill.Tests.csproj" />
+  <Project Path="Fyers.Backfill/Fyers.Backfill.csproj" />
+  <Project Path="Fyers.Collector/Fyers.Collector.csproj" />
+  <Project Path="Fyers.Core.Tests/Fyers.Core.Tests.csproj" />
+  <Project Path="Fyers.Core/Fyers.Core.csproj" />
+  <Project Path="Fyers.Token.Tests/Fyers.Token.Tests.csproj" />
+  <Project Path="Fyers.Token/Fyers.Token.csproj" />
+</Solution>

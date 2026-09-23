@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Fyers.Core\Fyers.Core.csproj" />
+    <!-- The token service library: this host serves /callback + /healthz, so
+         login and capture are one process (merged 2026-09-23). -->
+    <ProjectReference Include="..\Fyers.Token\Fyers.Token.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+</Project>

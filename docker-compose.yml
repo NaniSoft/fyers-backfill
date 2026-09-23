@@ -1,0 +1,29 @@
+# Local historical-data backfill against a mounted file share.
+#
+#   cp .env.example .env         # fill in FYERS_APP_ID / FYERS_SECRET_ID / redirect
+#   docker compose build
+#   docker compose run --rm backfill login
+#   docker compose run --rm backfill universe
+#   docker compose run --rm backfill pilot
+#   docker compose run --rm backfill backfill
+#   docker compose run --rm backfill status
+#
+# The dataset lands in ${FYERS_SHARE:-./data-backfill} as
+#   <resolution>/<SYMBOL>.parquet   (Zstd), e.g. 1min/NSE_SBIN-EQ.parquet
+services:
+  backfill:
+    build: .
+    image: fyers-backfill:local
+    env_file: .env
+    environment:
+      FYERS_BACKFILL_ROOT: /data
+      # Inside a container the OAuth callback must be reachable from the host:
+      # publish the port and set FYERS_REDIRECT_URI to the host address.
+      FYERS_BIND_URL: http://0.0.0.0:8001
+    ports:
+      - "8001:8001"
+    volumes:
+      - ${FYERS_SHARE:-./data-backfill}:/data
+      # Mount a customized config.yaml if you do not want the built-in defaults:
+      # - ./config.yaml:/app/config.yaml:ro
+    command: ["status"]

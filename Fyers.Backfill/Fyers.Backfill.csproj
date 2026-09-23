@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <AssemblyName>Fyers.Backfill</AssemblyName>
+    <RootNamespace>Fyers.Backfill</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Fyers.Core\Fyers.Core.csproj" />
+    <!-- Token-file reading + the daily OAuth callback host, reused unchanged so
+         the local backfill image can run `login` itself. -->
+    <ProjectReference Include="..\Fyers.Token\Fyers.Token.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Parquet writer (pure managed — no native libs, so the image stays a
+         plain aspnet runtime). Zstd compression keeps the 1-min dataset small. -->
+    <PackageReference Include="Parquet.Net" Version="6.1.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Fyers.Backfill.Tests" />
+  </ItemGroup>
+
+</Project>

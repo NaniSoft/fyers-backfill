@@ -1,0 +1,174 @@
+# Local config — copy of config.example.yaml. Edit freely; secrets stay in .env.
+
+symbols:
+  - underlying: NIFTY
+    chain_symbol: NSE:NIFTY50-INDEX
+    spot_symbol: NSE:NIFTY50-INDEX
+    weekly: true
+  - underlying: BANKNIFTY
+    chain_symbol: NSE:NIFTYBANK-INDEX
+    spot_symbol: NSE:NIFTYBANK-INDEX
+    weekly: false
+
+constituents:
+  enabled: true
+  indices:
+    - name: "NIFTY 50"
+      csv: "https://archives.nseindia.com/content/indices/ind_nifty50list.csv"
+      fallback: "https://niftyindices.com/IndexConstituent/ind_nifty50list.csv"
+      tag: NIFTY50
+    - name: "NIFTY BANK"
+      csv: "https://archives.nseindia.com/content/indices/ind_niftybanklist.csv"
+      fallback: "https://niftyindices.com/IndexConstituent/ind_niftybanklist.csv"
+      tag: NIFTYBANK
+  stock_options:
+    n_monthly: 2              # 2 nearest monthly (59 F&O x 2 = ~135/min, safe under 190)
+    strikecount: 50
+    greeks: true
+  stock_futures:
+    n_months: 3
+  quotes_chunk: 50
+
+options:
+  strikecount: 50
+  greeks: true
+  n_weekly: 2
+  n_monthly: 3
+  n_yearly: 2
+
+futures:
+  n_months: 3
+
+session:
+  tz: Asia/Kolkata
+  quotes_start: "08:30"
+  start: "09:00"               # chains (full mode) from 09:00: the user wants
+                               # minute-by-minute dynamics through the CAS
+                               # pre-open auction (09:00-09:08) — chain data
+                               # here is partly redundant/stale; accepted.
+  end: "16:00"                 # full mode till 16:00 (post-close minutes too)
+  quotes_end: "16:00"
+  premarket_times: ["08:45", "10:00"]
+  eod_time: "15:31"
+
+storage:
+  daily_dir: data
+  summary_db: data/summary.db
+  archive_dir: data/archive
+  legacy_db: data/snapshots.db
+
+retention:
+  hot_days: 1
+
+rate_limit:
+  per_minute: 190
+  per_second: 8
+
+resilience:
+  max_restarts: 12
+  restart_backoff_sec: 15
+
+holidays:
+  dates: []
+
+auth:
+  # Two modes (containerization tickets 01/02/04):
+  #   legacy   — in-process headless browser re-login (pre-k8s path)
+  #   callback — the token service owns login: it Telegrams a Fyers login URL
+  #              when the token file is missing/expired; the user clicks and
+  #              logs in on Fyers' own page; Fyers redirects to
+  #              <callback_base_url>/callback, where the service exchanges the
+  #              auth_code and writes token_file. One click/day IS the design
+  #              (refresh-token flow is regulatory-dead, April 2026).
+  mode: "callback"             # token service owns login (tickets 04/05); legacy = in-process headless re-login (host fallback)
+  token_file: "data/fyers_access_token.json"   # shared by collector + token service; the k8s PVC root is data/
+  callback_base_url: "http://127.0.0.1:8001"   # + /callback must byte-match FYERS_REDIRECT_URI (Fyers app registration)
+  prompt_time: "06:30"         # IST; daily login prompt (token death ≈ 06:00 — never prompt 00:00–06:00)
+  remind_interval_min: 60      # re-mind while a login is still pending
+  watch_interval_sec: 60       # token-file health check cadence
+  auth_time: "08:00"           # IST; legacy-mode daily proactive re-auth slot
+  selectors:                   # legacy only — Fyers web login, mapped live 2026-08-29 (docs/auth-flow.md).
+                               # No password field exists: client ID -> TOTP -> PIN.
+                               # If login starts failing, re-run research/auth_spike.py.
+    login_type_client: "#clientId_rb"  # "Client ID" login-type radio
+    login_id: "#fy_client_id:visible"  # Client ID input (:visible — SPA pre-renders hidden duplicates)
+    login_id_submit: "#clientIdSubmit" # submit after client ID
+    totp_boxes: ".otp-field:visible"   # 6 separate TOTP digit boxes
+    totp_submit: "#confirmOtpSubmit:visible"
+    pin_boxes: ".pin-field:visible"    # 4 separate PIN digit boxes
+    pin_submit: "#verifyPinSubmit:visible"
+
+notify:
+  hourly_rollup: true
+  missed_min_alert: 3          # alert after N consecutive missed minutes
+
+gdrive:
+  enabled: true
+  remote: gdrive               # rclone remote name
+  path: fyers-snapshots        # folder on Drive
+  time: "23:15"                # IST; daily backup slot. Must be later than
+                               # quotes_end (the upload blocks the loop) and
+                               # after the candles budget max (21:00+120min),
+                               # so the day is complete before it leaves the
+                               # box. Idempotent rclone copy — pending days
+                               # missed while the pod was down ride the next
+                               # run.
+
+candles:
+  enabled: true
+  time: "21:00"                # IST; slot for the candles backfill. 21:00 (moved from the
+                               # 17:00 default 2026-09-07): derivative candle publication
+                               # lags the close — legs absent at 17:00, served by 19:10 —
+                               # so an early slot false-negatives the probe and drops the
+                               # day's leg candles. Must stay later than quotes_end.
+  lookback_days: 6
+  budget_min: 120
+  probe_retry_min: 10          # re-probe the derivative gate once after 10 min if the
+                               # first pass comes back all-empty (0 = single pass)
+# ---- macro universe (added 2026-09-16; .NET port) -------------------------
+# Expands capture beyond the equity chain universe. Verified live against the
+# Fyers API the same morning: NSE commodity segment (COM master) serves Gold/
+# Silver/Crude/NG futures with live OHLCV+VWAP (atp) but NO OI anywhere
+# (quotes None, depth oi=0 always, history no_data — Fyers feed gap); NSE CDS
+# serves USDINR/EURINR futures incl. history+oi; sectoral index FUTURES do not
+# exist on NSE (rationalized away) — only cash-market index L1 quotes.
+macro_universe:
+  enabled: true
+  n_months: 2                  # current + next monthly contracts (what exists)
+  commodities: [GOLD, SILVER, CRUDEOIL, NATURALGAS]
+  currencies: [USDINR, EURINR]
+  index_spots: [NIFTYIT, NIFTYAUTO, NIFTYPHARMA, NIFTYMETAL,
+                NIFTYFMCG, NIFTYREALTY, MIDCPNIFTY, NIFTYSMLCAP100]
+
+# ---------------------------------------------------------------------------
+# Historical 1-minute OHLCV backfill (Fyers /data/history + the expired-F&O
+# endpoints). This section drives the SEPARATE fyers-backfill image, which the
+# user runs locally against a mounted file share; it writes one Parquet file per
+# (resolution, instrument) under <root>/<resolution>/<SYMBOL>.parquet. The live
+# collector ignores this section entirely.
+#
+# Fyers limits are GLOBAL to the account: 10/s, 200/min, 100,000/day, and >3
+# per-minute breaches in a day blocks the account until midnight. The live
+# collector shares that pool, so keep the backfill outside market hours (or use
+# a separate account) and let daily_budget cap each run.
+# ---------------------------------------------------------------------------
+backfill:
+  root: /data                 # mounted file share; the dataset lands here
+  from: "2017-07-03"          # documented 1-minute floor
+  to: null                    # null = today (IST)
+  chunk_days: 100             # Fyers caps minute resolutions at 100 days/request
+  resolutions: ["1"]          # "1" = 1-minute; add "D" for daily candles
+  include_oi: true            # oi_flag / include_oi for derivatives
+  daily_budget: 90000         # max requests per run (the account pool is 100k/day)
+  max_minutes: 0              # wall-clock cap per run (0 = unlimited)
+  market_hours_only: false    # true = refuse to run 09:15-15:30 IST
+  rate_limit:
+    per_minute: 190
+    per_second: 8
+  universe:
+    equities: true            # every NSE cash equity (NSE_CM master)
+    futures: true             # live futures (NSE_FO master)
+    options: true             # live options (NSE_FO master)
+    expired: true             # expired F&O via /data/history/fno/expired/*
+    underlyings: []           # [] = all; else stems, e.g. [NIFTY, BANKNIFTY, RELIANCE]
+  master_cache_dir: null      # default <root>/_masters

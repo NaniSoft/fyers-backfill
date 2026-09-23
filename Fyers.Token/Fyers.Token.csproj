@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>false</InvariantGlobalization>
+  </PropertyGroup>
+
+  <!-- ASP.NET Core shared framework for the token service's HTTP surface
+       (IEndpointRouteBuilder / Results) and BackgroundService — a library, not
+       a web app. -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- TokenService internals are exercised directly by the tests. -->
+    <InternalsVisibleTo Include="Fyers.Token.Tests" />
+  </ItemGroup>
+
+  <!--
+    The token service as a LIBRARY (merged 2026-09-23): the collector host owns
+    the process and serves /callback + /healthz on the callback port, so login
+    and capture are one always-on container. Still self-contained — no
+    Fyers.Core reference, its own tiny .env reader — and still reads .env only
+    (never appsettings*.json).
+  -->
+</Project>
