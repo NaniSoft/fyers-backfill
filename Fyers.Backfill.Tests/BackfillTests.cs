@@ -241,7 +241,39 @@ public sealed class BackfillTests
         Assert.Equal(100.5m, candles[0].Close);
     }
 
+    // ----------------------------------------------------- token freshness
+
+    [Fact]
+    public void TokenFile_stays_fresh_across_midnight_until_06_IST()
+    {
+        var saved = IstEpoch(2026, 9, 24, 23, 40);        // minted just before midnight
+
+        Assert.True(TokenFile.IsFresh(saved, IstUtc(2026, 9, 25, 0, 0)));    // past midnight, still valid
+        Assert.True(TokenFile.IsFresh(saved, IstUtc(2026, 9, 25, 5, 59)));   // just before the 06:00 reset
+        Assert.False(TokenFile.IsFresh(saved, IstUtc(2026, 9, 25, 6, 1)));   // reset passed
+
+        // A token minted before 06:00 is only good until that same day's 06:00.
+        var earlyMorning = IstEpoch(2026, 9, 24, 5, 0);
+        Assert.False(TokenFile.IsFresh(earlyMorning, IstUtc(2026, 9, 24, 6, 1)));
+        Assert.True(TokenFile.IsFresh(earlyMorning, IstUtc(2026, 9, 24, 5, 30)));
+    }
+
     // -------------------------------------------------------------- helpers
+
+    private static TimeZoneInfo IstTz()
+    {
+        try { return TimeZoneInfo.FindSystemTimeZoneById("Asia/Kolkata"); }
+        catch (TimeZoneNotFoundException) { return TimeZoneInfo.FindSystemTimeZoneById("India Standard Time"); }
+    }
+
+    private static long IstEpoch(int y, int m, int d, int h, int min)
+    {
+        var local = new DateTime(y, m, d, h, min, 0, DateTimeKind.Unspecified);
+        return new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(local, IstTz())).ToUnixTimeSeconds();
+    }
+
+    private static DateTime IstUtc(int y, int m, int d, int h, int min)
+        => TimeZoneInfo.ConvertTimeToUtc(new DateTime(y, m, d, h, min, 0, DateTimeKind.Unspecified), IstTz());
 
     private static FyersClient BuildClient(Func<HttpRequestMessage, HttpResponseMessage> responder)
     {
