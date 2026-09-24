@@ -36,6 +36,7 @@ public sealed class UniverseBuilder(BackfillConfig cfg, FyersClient client, ILog
     public async Task<IReadOnlyList<Instrument>> BuildAsync(CancellationToken ct)
     {
         var instruments = new List<Instrument>();
+        Directory.CreateDirectory(cfg.MasterCache);
 
         if (cfg.UniverseEquities)
         {

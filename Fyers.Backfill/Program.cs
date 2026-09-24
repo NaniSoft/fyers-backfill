@@ -52,6 +52,10 @@ var cfg = BackfillConfig.Load(configPath, envPath);
 var rootOverride = cli.Root ?? Environment.GetEnvironmentVariable("FYERS_BACKFILL_ROOT");
 if (rootOverride is not null)
     cfg = cfg with { Root = rootOverride };
+if (cli.From is { } fromDate)
+    cfg = cfg with { From = fromDate };
+if (cli.To is { } toDate)
+    cfg = cfg with { To = toDate };
 
 using var loggerFactory = LoggerFactory.Create(b =>
 {
@@ -258,6 +262,8 @@ internal sealed record Cli(
     string? DataDir,
     string? RepoRoot,
     string? Root,
+    DateOnly? From,
+    DateOnly? To,
     int PilotCount)
 {
     public const string Usage = """
@@ -277,11 +283,15 @@ internal sealed record Cli(
           --data-dir PATH       where fyers_access_token.json lives (default <repo>/data)
           --repo-root PATH      repo root used for the defaults above
           --root PATH           dataset root / file share (overrides backfill.root)
+          --from YYYY-MM-DD     override the start date (e.g. 2026-09-01)
+          --to YYYY-MM-DD       override the end date (e.g. 2026-09-24)
+          --pilot N             instrument count for the pilot command
         """;
 
     public static Cli Parse(string[] args)
     {
         string? command = null, config = null, env = null, dataDir = null, repoRoot = null, root = null;
+        DateOnly? from = null, to = null;
         var pilot = 5;
 
         for (var i = 0; i < args.Length; i++)
@@ -300,6 +310,8 @@ internal sealed record Cli(
                 case "--data-dir": dataDir = Value(); break;
                 case "--repo-root": repoRoot = Value(); break;
                 case "--root": root = Value(); break;
+                case "--from": from = ParseDate(Value(), "--from"); break;
+                case "--to": to = ParseDate(Value(), "--to"); break;
                 case "--pilot":
                     pilot = int.Parse(Value(), System.Globalization.CultureInfo.InvariantCulture);
                     break;
@@ -311,6 +323,12 @@ internal sealed record Cli(
             }
         }
 
-        return new Cli(command, config, env, dataDir, repoRoot, root, pilot);
+        return new Cli(command, config, env, dataDir, repoRoot, root, from, to, pilot);
     }
+
+    private static DateOnly ParseDate(string raw, string flag)
+        => DateOnly.TryParseExact(raw, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.None, out var d)
+            ? d
+            : throw new ArgumentException($"{flag} must be yyyy-MM-dd (got '{raw}')");
 }

@@ -73,6 +73,13 @@ docker run --rm -v "$SHARE":/data --env-file .env fyers-backfill:local backfill
 docker run --rm -v "$SHARE":/data --env-file .env fyers-backfill:local update
 ```
 
+Collect a single window (e.g. this month) instead of the full 2017→today sweep:
+
+```sh
+docker run --rm -v "$SHARE":/data --env-file .env fyers-backfill:local \
+  backfill --from 2026-09-01 --to 2026-09-24
+```
+
 `docker compose` equivalents are in `docker-compose.yml`
 (`FYERS_SHARE=/mnt/nas/fyers-data docker compose run --rm backfill backfill`).
 
@@ -92,6 +99,8 @@ docker run --rm -v "$SHARE":/data --env-file .env fyers-backfill:local update
 | option | default | meaning |
 |---|---|---|
 | `--root PATH` | `$FYERS_BACKFILL_ROOT` or `data/backfill` | dataset root (the mounted share) |
+| `--from YYYY-MM-DD` | `backfill.from` (2017-07-03) | override the start date |
+| `--to YYYY-MM-DD` | `backfill.to` (today IST) | override the end date |
 | `--config PATH` | `<repo>/config.yaml` | config file (optional; built-in defaults apply) |
 | `--env PATH` | `<repo>/.env` | credentials |
 | `--data-dir PATH` | `<repo>/data` | where `fyers_access_token.json` lives |
