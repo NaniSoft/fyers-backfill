@@ -102,6 +102,7 @@ public sealed class UniverseBuilder(BackfillConfig cfg, FyersClient client, ILog
 
         var stems = await DiscoverStemsAsync(ct);
         var instruments = new List<Instrument>();
+        var futuresCount = 0;
         foreach (var stem in stems)
         {
             ct.ThrowIfCancellationRequested();
@@ -109,18 +110,43 @@ public sealed class UniverseBuilder(BackfillConfig cfg, FyersClient client, ILog
             try
             {
                 var expiries = client.ExpiredExpiryDates(underlyingSymbol, cfg.From, cfg.EndDate, ct);
-                foreach (var expiry in expiries)
+
+                // Futures: expired futures DO have history (live-verified).
+                foreach (var expiry in expiries.Futures)
                 {
                     ct.ThrowIfCancellationRequested();
-                    var expiryDate = DateOnly.FromDateTime(
-                        DateTimeOffset.FromUnixTimeSeconds(expiry).UtcDateTime.AddHours(5.5));
-                    foreach (var symbol in client.ExpiredUnderlyingSymbols(underlyingSymbol, expiryDate, ct))
+                    var contracts = client.ExpiredUnderlyingSymbols(underlyingSymbol, expiry, ct);
+                    foreach (var symbol in contracts.Futures)
                     {
-                        instruments.Add(ClassifyExpired(symbol, stem, expiry));
+                        instruments.Add(new Instrument(symbol, Instrument.KindFuture,
+                            Underlying: stem, ExpiryEpoch: EpochOf(expiry), Segment: "FO", Expired: true));
+                        futuresCount++;
                     }
                 }
-                log.LogInformation("universe: expired {Stem}: {Count} contracts over {Expiries} expiries",
-                    stem, instruments.Count, expiries.Count);
+
+                // Options: expired option history is NOT served by Fyers
+                // (s=no_data, live-verified) — only attempt when explicitly asked.
+                if (cfg.UniverseExpiredOptions)
+                {
+                    foreach (var expiry in expiries.Options)
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        var contracts = client.ExpiredUnderlyingSymbols(underlyingSymbol, expiry, ct);
+                        foreach (var symbol in contracts.Options)
+                        {
+                            var upper = symbol.ToUpperInvariant();
+                            var optType = upper.EndsWith("CE", StringComparison.Ordinal) ? "CE"
+                                : upper.EndsWith("PE", StringComparison.Ordinal) ? "PE" : null;
+                            instruments.Add(new Instrument(symbol, Instrument.KindOption,
+                                Underlying: stem, ExpiryEpoch: EpochOf(expiry),
+                                OptionType: optType, Segment: "FO", Expired: true));
+                        }
+                    }
+                }
+
+                log.LogInformation(
+                    "universe: expired {Stem}: futures expiries={Fut} options expiries={Opt} (running futures total {Total})",
+                    stem, expiries.Futures.Count, expiries.Options.Count, futuresCount);
             }
             catch (AuthExpiredException)
             {
@@ -167,20 +193,9 @@ public sealed class UniverseBuilder(BackfillConfig cfg, FyersClient client, ILog
     public static string UnderlyingSymbol(string stem)
         => IndexSymbols.TryGetValue(stem, out var idx) ? idx : $"NSE:{stem}-EQ";
 
-    /// <summary>
-    /// Classify one expired contract symbol. Fyers option tickers end in CE/PE
-    /// (e.g. <c>NSE:NIFTY26MAR24800CE</c>); everything else is treated as a future.
-    /// </summary>
-    private static Instrument ClassifyExpired(string symbol, string stem, long expiryEpoch)
-    {
-        var upper = symbol.ToUpperInvariant();
-        var optionType = upper.EndsWith("CE", StringComparison.Ordinal) ? "CE"
-            : upper.EndsWith("PE", StringComparison.Ordinal) ? "PE"
-            : null;
-        var kind = optionType is null ? Instrument.KindFuture : Instrument.KindOption;
-        return new Instrument(symbol, kind, Underlying: stem, ExpiryEpoch: expiryEpoch,
-            OptionType: optionType, Segment: "FO", Expired: true);
-    }
+    /// <summary>Expiry date -> epoch seconds at 00:00 UTC (round-trips via Instrument.ExpiryDate).</summary>
+    private static long EpochOf(DateOnly d)
+        => new DateTimeOffset(d.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero).ToUnixTimeSeconds();
 
     private IReadOnlyList<Instrument> ApplyWhitelist(List<Instrument> instruments)
     {

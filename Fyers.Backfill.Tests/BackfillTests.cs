@@ -225,9 +225,9 @@ public sealed class BackfillTests
         {
             var url = req.RequestUri!.ToString();
             var body = url.Contains("expiry-dates")
-                ? """{"s":"ok","data":[1790676600,{"expiry":"1793270400"}]}"""
+                ? """{"s":"ok","data":{"expiry_dates":{"futures":["2026-08-25"],"options":["2026-08-04","2026-08-11"]}}}"""
                 : url.Contains("underlying-symbols")
-                    ? """{"s":"ok","data":["NSE:NIFTY26AUGFUT",{"symbol":"NSE:NIFTY26AUG24800CE"}]}"""
+                    ? """{"s":"ok","data":{"contracts":{"futures":["NSE:NIFTY26AUGFUT"],"options":["NSE:NIFTY26AUG18000CE"]}}}"""
                     : """{"s":"ok","candles":[[1790676600,100,101,99,100.5,1234]]}""";
             return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
             {
@@ -239,13 +239,15 @@ public sealed class BackfillTests
 
         var expiries = client.ExpiredExpiryDates("NSE:NIFTY50-INDEX",
             new DateOnly(2026, 1, 1), new DateOnly(2026, 12, 31));
-        Assert.Equal([1790676600L, 1793270400L], expiries);
+        Assert.Equal([new DateOnly(2026, 8, 25)], expiries.Futures);
+        Assert.Equal([new DateOnly(2026, 8, 4), new DateOnly(2026, 8, 11)], expiries.Options);
 
-        var symbols = client.ExpiredUnderlyingSymbols("NSE:NIFTY50-INDEX", new DateOnly(2026, 8, 27));
-        Assert.Equal(["NSE:NIFTY26AUGFUT", "NSE:NIFTY26AUG24800CE"], symbols);
+        var symbols = client.ExpiredUnderlyingSymbols("NSE:NIFTY50-INDEX", new DateOnly(2026, 8, 25));
+        Assert.Equal(["NSE:NIFTY26AUGFUT"], symbols.Futures);
+        Assert.Equal(["NSE:NIFTY26AUG18000CE"], symbols.Options);
 
-        var candles = client.FnoHistoricalData("NSE:NIFTY26AUG24800CE",
-            new DateOnly(2026, 8, 1), new DateOnly(2026, 8, 27));
+        var candles = client.FnoHistoricalData("NSE:NIFTY26AUGFUT",
+            new DateOnly(2026, 8, 1), new DateOnly(2026, 8, 25));
         Assert.Single(candles);
         Assert.Equal(100.5m, candles[0].Close);
     }

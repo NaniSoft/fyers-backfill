@@ -50,6 +50,13 @@ public sealed record BackfillConfig
     public bool UniverseOptions { get; init; } = true;
     public bool UniverseExpired { get; init; } = true;
 
+    /// <summary>
+    /// Include EXPIRED options. Default false and effectively unusable: Fyers
+    /// returns no_data for expired option history (live-verified 2026-09-25), so
+    /// enabling this only burns requests.
+    /// </summary>
+    public bool UniverseExpiredOptions { get; init; }
+
     /// <summary>Optional whitelist of underlyings (bare stems). Empty = every underlying.</summary>
     public IReadOnlyList<string> Underlyings { get; init; } = [];
 
@@ -101,6 +108,7 @@ public sealed record BackfillConfig
             UniverseFutures = universe.Bool("futures", true),
             UniverseOptions = universe.Bool("options", true),
             UniverseExpired = universe.Bool("expired", true),
+            UniverseExpiredOptions = universe.Bool("expired_options", false),
             Underlyings = universe.StrList("underlyings"),
             MasterCacheDir = root.StrOrNull("master_cache_dir"),
             Env = env,
