@@ -99,15 +99,15 @@ public sealed class BackfillRunner(
 
             try
             {
-                var (bars, used) = await FetchAsync(item, ct);
+                var (bars, used, effective) = await FetchAsync(item, ct);
                 requests += used;
-                var total = await store.MergeWriteAsync(item.Instrument, item.Resolution, bars, ct);
+                var total = await store.MergeWriteAsync(effective, item.Resolution, bars, ct);
                 ledger.MarkDone(item, bars.Count, used);
                 completed++;
                 rows += bars.Count;
                 log.LogInformation(
                     "backfill: {Symbol} {Res} {From}..{To} -> {Bars} bars ({Total} in partition)",
-                    item.Instrument.Symbol, item.Resolution, item.From, item.To, bars.Count, total);
+                    effective.Symbol, item.Resolution, item.From, item.To, bars.Count, total);
             }
             catch (AuthExpiredException e)
             {
@@ -142,9 +142,13 @@ public sealed class BackfillRunner(
     /// <summary>
     /// Fetch one window, retrying while the limiter drains the minute. Expired
     /// contracts go through the expired endpoints; everything else through
-    /// <c>/data/history</c>. Returns the bars and the request count consumed.
+    /// <c>/data/history</c>. When an equity is not served in the <c>-EQ</c> series
+    /// (Fyers returns "Invalid symbol" — the ticker trades trade-for-trade), it
+    /// falls back to <c>-BE</c> and returns the effective instrument so the row
+    /// lands under the real symbol. Returns bars, requests consumed, instrument.
     /// </summary>
-    private async Task<(IReadOnlyList<CandleRow> Bars, int Requests)> FetchAsync(WorkItem item, CancellationToken ct)
+    private async Task<(IReadOnlyList<CandleRow> Bars, int Requests, Instrument Instrument)> FetchAsync(
+        WorkItem item, CancellationToken ct)
     {
         var inst = item.Instrument;
         var attempts = 0;
@@ -159,13 +163,25 @@ public sealed class BackfillRunner(
                     : client.History(inst.Symbol, item.From, item.To,
                         oiFlag: cfg.IncludeOi && inst.WantsOi, contFlag: inst.WantsCont,
                         resolution: item.Resolution, ct);
-                return (bars, attempts);
+                return (bars, attempts, inst);
             }
             catch (RateLimitedException e) when (attempts < MaxRateLimitRetries)
             {
                 log.LogDebug("backfill: limiter drain, retrying {Symbol} in {Sec}s ({Message})",
                     inst.Symbol, RateLimitBackoff.TotalSeconds, e.Message);
                 await Task.Delay(RateLimitBackoff, ct);
+            }
+            catch (InvalidOperationException e)
+                when (inst.Kind == Instrument.KindEquity
+                      && inst.Symbol.EndsWith("-EQ", StringComparison.Ordinal)
+                      && e.Message.Contains("Invalid symbol", StringComparison.OrdinalIgnoreCase))
+            {
+                // EQ series not served for this ticker (it trades in BE / T2T).
+                var be = inst with { Symbol = inst.Symbol[..^"-EQ".Length] + "-BE" };
+                log.LogInformation("backfill: {Eq} not served as EQ — retrying as {Be}", inst.Symbol, be.Symbol);
+                var bars = client.History(be.Symbol, item.From, item.To,
+                    oiFlag: false, contFlag: false, resolution: item.Resolution, ct);
+                return (bars, attempts + 1, be);
             }
         }
     }
