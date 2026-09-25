@@ -131,6 +131,15 @@ public sealed class BackfillTests
         Assert.Equal(["NIFTY", "RELIANCE"], o.Underlyings);
     }
 
+    [Fact]
+    public void BackfillConfig_treats_yaml_null_to_as_absent()
+    {
+        Assert.Null(BackfillConfig.Parse("backfill:\n  to: null\n").To);
+        Assert.Null(BackfillConfig.Parse("backfill:\n  to: ~\n").To);
+        Assert.Null(BackfillConfig.Parse("backfill:\n  to:\n").To);
+        Assert.Equal(new DateOnly(2026, 9, 24), BackfillConfig.Parse("backfill:\n  to: \"2026-09-24\"\n").To);
+    }
+
     // ---------------------------------------------------------------- parquet
 
     [Fact]

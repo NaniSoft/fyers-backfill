@@ -144,10 +144,25 @@ internal sealed class Map
 
     public string Str(string key, string def) => StrOrNull(key) ?? def;
 
-    public string? StrOrNull(string key) =>
-        TryGet(key, out var node) && node is YamlScalarNode scalar && !string.IsNullOrEmpty(scalar.Value)
-            ? scalar.Value
-            : null;
+    public string? StrOrNull(string key)
+    {
+        if (!TryGet(key, out var node) || node is not YamlScalarNode scalar)
+            return null;
+        // A YAML null (`to: null`, `to: ~`, `to:`) arrives as a scalar with the
+        // null tag or a null-ish value — treat it as absent, not the string "null".
+        if (IsNullScalar(scalar) || string.IsNullOrEmpty(scalar.Value))
+            return null;
+        return scalar.Value;
+    }
+
+    private static bool IsNullScalar(YamlScalarNode scalar)
+    {
+        if (scalar.Tag.ToString().Contains("null", StringComparison.OrdinalIgnoreCase))
+            return true;
+        var v = scalar.Value;
+        return v is "" or "~"
+               || string.Equals(v, "null", StringComparison.OrdinalIgnoreCase);
+    }
 
     public int Int(string key, int def)
     {
