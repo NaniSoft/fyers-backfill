@@ -101,7 +101,9 @@ public sealed class BackfillRunner(
             {
                 var (bars, used, effective) = await FetchAsync(item, ct);
                 requests += used;
-                var total = await store.MergeWriteAsync(effective, item.Resolution, bars, ct);
+                var total = cfg.PartFiles
+                    ? await store.WritePartAsync(effective, item.Resolution, item.From, item.To, bars, ct)
+                    : await store.MergeWriteAsync(effective, item.Resolution, bars, ct);
                 ledger.MarkDone(item, bars.Count, used);
                 completed++;
                 rows += bars.Count;

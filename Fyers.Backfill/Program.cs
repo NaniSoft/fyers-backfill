@@ -74,6 +74,9 @@ if (cli.Command == "login")
 if (cli.Command == "status")
     return Status(cfg, log);
 
+if (cli.Command == "compact")
+    return await CompactAsync(cfg, log);
+
 // Everything below needs a live token.
 var tokenFile = new TokenFile(tokenPath);
 var token = tokenFile.AccessToken();
@@ -235,6 +238,33 @@ static int Status(BackfillConfig cfg, ILogger log)
     return 0;
 }
 
+/// <summary>Fold every symbol's part files into its single merged parquet file.</summary>
+static async Task<int> CompactAsync(BackfillConfig cfg, ILogger log)
+{
+    var partsRoot = Path.Combine(cfg.Root, "_parts");
+    if (!Directory.Exists(partsRoot))
+    {
+        log.LogInformation("compact: no part files under {Root}", partsRoot);
+        return 0;
+    }
+
+    var store = new CandleStore(cfg.Root);
+    var symbols = 0;
+    long rows = 0;
+    foreach (var resDir in Directory.GetDirectories(partsRoot))
+    {
+        foreach (var symDir in Directory.GetDirectories(resDir))
+        {
+            rows += await store.CompactSymbolDirAsync(symDir, CancellationToken.None);
+            symbols++;
+            if (symbols % 250 == 0)
+                log.LogInformation("compact: {Symbols} symbols folded, {Rows} rows", symbols, rows);
+        }
+    }
+    log.LogInformation("compact done: {Symbols} symbols, {Rows} rows", symbols, rows);
+    return 0;
+}
+
 /// <summary>NSE continuous session (09:15–15:30 IST, Mon–Fri). Holidays are not
 /// modelled here: a holiday simply wastes no requests because the window returns
 /// no data.</summary>
@@ -276,6 +306,7 @@ internal sealed record Cli(
           backfill              Full resumable sweep
           update                Newest window per instrument (daily increment)
           status                Ledger + dataset summary
+          compact               Fold _parts/* part files into the per-symbol file
 
         Options:
           --config PATH         config.yaml (default <repo>/config.yaml)

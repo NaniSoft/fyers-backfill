@@ -33,6 +33,14 @@ public sealed record BackfillConfig
     /// <summary>Request oi_flag/include_oi for derivatives.</summary>
     public bool IncludeOi { get; init; } = true;
 
+    /// <summary>
+    /// Write each window as its own part file under <c>_parts/</c> instead of
+    /// read-merge-rewriting the whole symbol file. Much faster for a long
+    /// backward sweep; run the <c>compact</c> pass afterwards to fold parts into
+    /// the single per-symbol file.
+    /// </summary>
+    public bool PartFiles { get; init; }
+
     /// <summary>Max API requests one run may spend (the account pool is 100k/day).</summary>
     public int DailyBudget { get; init; } = 90_000;
 
@@ -99,6 +107,7 @@ public sealed record BackfillConfig
             ChunkDays = root.Int("chunk_days", 100),
             Resolutions = ListOr(root.StrList("resolutions"), ["1"]),
             IncludeOi = root.Bool("include_oi", true),
+            PartFiles = root.Bool("part_files", false),
             DailyBudget = root.Int("daily_budget", 90_000),
             MaxMinutes = root.Int("max_minutes", 0),
             MarketHoursOnly = root.Bool("market_hours_only", false),
