@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 using Fyers.Backfill.Config;
 using Fyers.Backfill.Failures;
 using Fyers.Backfill.Instruments;
@@ -57,6 +58,12 @@ public sealed class BackfillRunner(
 
     private readonly Func<DateTime> _clock = clock ?? (() => DateTime.UtcNow);
 
+    /// <summary>
+    /// Tickers Fyers no longer serves in any series, loaded from the ledger and
+    /// extended as runs discover them. See the skip in <see cref="RunAsync"/>.
+    /// </summary>
+    private readonly HashSet<string> _dead = new(StringComparer.Ordinal);
+
     public async Task<RunReport> RunAsync(RunMode mode, int pilotCount, CancellationToken ct)
     {
         var sw = Stopwatch.StartNew();
@@ -79,12 +86,27 @@ public sealed class BackfillRunner(
         var authExpired = false;
         var budgetExhausted = false;
 
+        // Tickers Fyers no longer serves at all (renamed away and delisted). The
+        // first "Invalid symbol" costs two requests; without this the remaining
+        // ~19 windows of that ticker would each cost two more, and the historical
+        // pass measured 74% of its requests going to tickers that can never answer.
+        var dead = _dead;
+        dead.Clear();
+        foreach (var s in LoadDead()) dead.Add(s);
+
         foreach (var item in work)
         {
             ct.ThrowIfCancellationRequested();
 
             if (ledger.IsDone(item.Key))
             {
+                skipped++;
+                continue;
+            }
+
+            if (dead.Contains(item.Instrument.Symbol))
+            {
+                ledger.MarkFailed(item, 0, "ticker not served by Fyers (skipped)");
                 skipped++;
                 continue;
             }
@@ -184,12 +206,51 @@ public sealed class BackfillRunner(
                 // EQ series not served for this ticker (it trades in BE / T2T).
                 var be = inst with { Symbol = inst.Symbol[..^"-EQ".Length] + "-BE" };
                 log.LogInformation("backfill: {Eq} not served as EQ — retrying as {Be}", inst.Symbol, be.Symbol);
-                var bars = client.History(be.Symbol, item.From, item.To,
-                    oiFlag: false, contFlag: false, resolution: item.Resolution, ct);
-                return (bars, attempts + 1, be);
+                try
+                {
+                    var bars = client.History(be.Symbol, item.From, item.To,
+                        oiFlag: false, contFlag: false, resolution: item.Resolution, ct);
+                    return (bars, attempts + 1, be);
+                }
+                catch (InvalidOperationException bex)
+                    when (bex.Message.Contains("Invalid symbol", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Neither -EQ nor -BE is served: the ticker is gone (renamed away
+                    // and delisted). Retire it for this and every later run.
+                    if (_dead.Add(inst.Symbol))
+                    {
+                        log.LogWarning("backfill: {Symbol} is not served in any series — "
+                                       + "retiring it ({Count} tickers so far)", inst.Symbol, _dead.Count);
+                        SaveDead(_dead);
+                    }
+                    throw;
+                }
             }
         }
     }
+
+    private const string DeadMetaKey = "dead_symbols";
+
+    private IEnumerable<string> LoadDead()
+    {
+        var raw = ledger.GetMeta(DeadMetaKey);
+        if (string.IsNullOrWhiteSpace(raw))
+            return new HashSet<string>(StringComparer.Ordinal);
+        try
+        {
+            var list = JsonSerializer.Deserialize<List<string>>(raw) ?? [];
+            log.LogInformation("backfill: {Count} tickers already retired as not-served", list.Count);
+            return new HashSet<string>(list, StringComparer.Ordinal);
+        }
+        catch (Exception e)
+        {
+            log.LogWarning("backfill: retired-ticker list unreadable, starting empty: {Message}", e.Message);
+            return new HashSet<string>(StringComparer.Ordinal);
+        }
+    }
+
+    private void SaveDead(HashSet<string> dead)
+        => ledger.SetMeta(DeadMetaKey, JsonSerializer.Serialize(dead.Order(StringComparer.Ordinal)));
 
     /// <summary>Keep only the newest planned window per (instrument, resolution).</summary>
     internal static IReadOnlyList<WorkItem> NewestPerInstrument(IReadOnlyList<WorkItem> planned)
