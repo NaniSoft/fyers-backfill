@@ -106,7 +106,10 @@ public sealed class BackfillRunner(
 
             if (dead.Contains(item.Instrument.Symbol))
             {
-                ledger.MarkFailed(item, 0, "ticker not served by Fyers (skipped)");
+                // Deliberately NOT marked failed: a retired ticker is not a failure,
+                // it is a ticker that will never answer, and the dead set is what
+                // keeps it from being retried. Marking it would bury real failures
+                // (16,846 of these swamped the genuine error count).
                 skipped++;
                 continue;
             }
