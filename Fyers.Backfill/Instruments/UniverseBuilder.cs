@@ -300,8 +300,8 @@ public sealed class UniverseBuilder(BackfillConfig cfg, FyersClient client, ILog
             // cash equities have no underlying stem — match the ticker prefix
             if (i.Kind == Instrument.KindEquity)
             {
-                var stem = InstrumentMaster.UnderlyingOf(i.Symbol);
-                return allow.Contains(stem);
+                var stem = InstrumentMaster.TickerOf(i.Symbol);
+                return allow.Contains(stem) || allow.Contains(i.Symbol);
             }
             return false;
         }).ToList();
