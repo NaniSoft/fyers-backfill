@@ -12,6 +12,81 @@ namespace Fyers.Backfill.Tests;
 
 public sealed class BackfillTests
 {
+    // ------------------------------------------------------------- sanitizer
+
+    [Fact]
+    public void Sanitizer_drops_bar_whose_high_is_below_its_open()
+    {
+        // live-verified: JISLDVREQS 2017-11-10 09:15 came back exactly like this
+        var row = new CandleRow("NSE:JISLDVREQS-EQ", 1510285500, 73.00m, 72.00m, 71.15m, 72.00m, 371m);
+
+        Assert.True(CandleSanitizer.TryClean(row, out var clean));
+        Assert.Equal(73.00m, clean.High);
+        Assert.Equal(71.15m, clean.Low);
+        Assert.Equal(72.00m, clean.Close);
+    }
+
+    [Fact]
+    public void Sanitizer_drops_non_positive_prices()
+    {
+        Assert.False(CandleSanitizer.TryClean(
+            new CandleRow("NSE:X-EQ", 1, 0m, 5m, 4m, 4.5m, 10m), out _));
+        Assert.False(CandleSanitizer.TryClean(
+            new CandleRow("NSE:X-EQ", 1, 5m, 5m, -1m, 4.5m, 10m), out _));
+    }
+
+    [Theory]
+    [InlineData(429496726000L)]   // 2^32 * 100 - 3600, seen on IVZINGOLD
+    [InlineData(858993473100L)]   // 2^32 * 200 + 13900, seen on GOLDBEES
+    [InlineData(-3600L)]
+    public void Sanitizer_zeroes_wrapped_volume_sentinels(long volume)
+    {
+        Assert.True(CandleSanitizer.TryClean(
+            new CandleRow("NSE:X-EQ", 1, 10m, 11m, 9m, 10.5m, volume), out var clean));
+        Assert.Equal(0m, clean.Volume);
+        Assert.Equal(10m, clean.Open);
+    }
+
+    [Fact]
+    public void Sanitizer_keeps_a_sane_bar_untouched()
+    {
+        var row = new CandleRow("NSE:SBIN-EQ", 1499053500, 274.2m, 275m, 274.2m, 274.65m, 112783m);
+        Assert.True(CandleSanitizer.TryClean(row, out var clean));
+        Assert.Equal(row, clean);
+    }
+
+    [Fact]
+    public void Sanitizer_cleans_a_list_and_removes_unsalvageable_bars()
+    {
+        var rows = new List<CandleRow>
+        {
+            new("NSE:X-EQ", 1, 73.00m, 72.00m, 71.15m, 72.00m, 1m),   // clamped
+            new("NSE:X-EQ", 2, 0m, 0m, 0m, 0m, 0m),                  // dropped
+            new("NSE:X-EQ", 3, 10m, 11m, 9m, 10.5m, 429496726000m),   // volume fixed
+        };
+
+        CandleSanitizer.Clean(rows);
+
+        Assert.Equal(2, rows.Count);
+        Assert.Equal(73.00m, rows[0].High);
+        Assert.Equal(0m, rows[1].Volume);
+    }
+
+    [Fact]
+    public void Sanitizer_counters_are_reported()
+    {
+        CandleSanitizer.ResetCounters();
+        CandleSanitizer.TryClean(new CandleRow("NSE:X-EQ", 1, 5m, 4m, 4m, 4.5m, 1m), out _);
+        CandleSanitizer.TryClean(new CandleRow("NSE:X-EQ", 2, 5m, 5m, 5m, 5m, 429496726000m), out _);
+        CandleSanitizer.TryClean(new CandleRow("NSE:X-EQ", 3, 0m, 0m, 0m, 0m, 0m), out _);
+
+        var (dropped, clamped, volumeFixed) = CandleSanitizer.Counters;
+        Assert.Equal(1, dropped);
+        Assert.Equal(1, clamped);
+        Assert.Equal(1, volumeFixed);
+        CandleSanitizer.ResetCounters();
+    }
+
     // ---------------------------------------------------------------- master
 
     [Fact]

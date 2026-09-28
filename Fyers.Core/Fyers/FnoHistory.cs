@@ -118,6 +118,7 @@ public sealed partial class FyersClient
                 Close: NumAt(candle, 4) ?? 0m,
                 Volume: candle.GetArrayLength() > 5 ? NumAt(candle, 5) ?? 0m : 0m));
         }
+        CandleSanitizer.Clean(rows);
         return rows;
     }
 

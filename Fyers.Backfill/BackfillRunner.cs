@@ -136,6 +136,9 @@ public sealed class BackfillRunner(
         log.LogInformation(
             "backfill done: completed={Completed} skipped={Skipped} failed={Failed} requests={Requests} rows={Rows} ({Elapsed:F0}s)",
             completed, skipped, failed, requests, rows, sw.Elapsed.TotalSeconds);
+        var (dropped, clamped, volFixed) = CandleSanitizer.Counters;
+        if (dropped + clamped + volFixed > 0)
+            log.LogInformation("backfill: {Sanitizer}", CandleSanitizer.Stats());
 
         return new RunReport(work.Count, completed, skipped, failed, requests, rows,
             authExpired, budgetExhausted, sw.Elapsed);

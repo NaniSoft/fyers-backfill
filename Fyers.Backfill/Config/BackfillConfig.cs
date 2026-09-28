@@ -68,6 +68,23 @@ public sealed record BackfillConfig
     /// <summary>Optional whitelist of underlyings (bare stems). Empty = every underlying.</summary>
     public IReadOnlyList<string> Underlyings { get; init; } = [];
 
+    /// <summary>
+    /// Also request the <em>historical</em> tickers of every equity that has changed
+    /// name. The NSE_CM master only lists the current ticker, so a stock that traded
+    /// as <c>RUCHI</c> until 2022-07-12 and as <c>PATANJALI</c> after would otherwise
+    /// have no history at all before the rename. The names come from the shared
+    /// <c>isin_symbol_map.json</c> (<c>isin2hist</c>), whose entries carry the
+    /// first/last-seen dates. Validation over the pulled set found 298 ISINs with at
+    /// least one entirely-missing era (315 of them inside the 2017-07-03+ window).
+    /// </summary>
+    public bool UniverseHistoricalEquities { get; init; } = true;
+
+    /// <summary>
+    /// Path to the shared <c>isin_symbol_map.json</c> that carries the name history.
+    /// Defaults to <c>&lt;isin_map_dir&gt;/isin_symbol_map.json</c>.
+    /// </summary>
+    public string? HistoricalEquitiesFile { get; init; }
+
     /// <summary>Where symbol masters are cached (default <c>&lt;root&gt;/_masters</c>).</summary>
     public string? MasterCacheDir { get; init; }
 
@@ -119,6 +136,9 @@ public sealed record BackfillConfig
             UniverseExpired = universe.Bool("expired", true),
             UniverseExpiredOptions = universe.Bool("expired_options", false),
             Underlyings = universe.StrList("underlyings"),
+            UniverseHistoricalEquities = universe.Bool("historical_equities", true),
+            HistoricalEquitiesFile = universe.StrOrNull("historical_equities_file")
+                                      ?? root.StrOrNull("historical_equities_file"),
             MasterCacheDir = root.StrOrNull("master_cache_dir"),
             Env = env,
         };

@@ -45,14 +45,21 @@ public static class WorkPlanner
                     var to = Min(end, expiry);
                     if (from <= to)
                         items.Add(new WorkItem(inst, resolution, from, to));
+                    continue;
                 }
-                else
+
+                // An instrument with a known life (a renamed equity's era) only gets
+                // its own window — pulling the full range for 1,179 historical
+                // tickers would cost ~40k requests for data that cannot exist.
+                var lifeFrom = Max(cfg.From, inst.WindowFrom ?? DateOnly.MinValue);
+                var lifeTo = Min(end, inst.WindowTo ?? DateOnly.MaxValue);
+                if (lifeFrom > lifeTo)
+                    continue;
+
+                for (var start = lifeFrom; start <= lifeTo; start = start.AddDays(chunk))
                 {
-                    for (var start = cfg.From; start <= end; start = start.AddDays(chunk))
-                    {
-                        var to = Min(end, start.AddDays(chunk - 1));
-                        items.Add(new WorkItem(inst, resolution, start, to));
-                    }
+                    var to = Min(lifeTo, start.AddDays(chunk - 1));
+                    items.Add(new WorkItem(inst, resolution, start, to));
                 }
             }
         }

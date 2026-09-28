@@ -128,6 +128,9 @@ public sealed partial class FyersClient
                 Volume: candle.GetArrayLength() > 5 ? NumAt(candle, 5) ?? 0m : 0m));
         }
 
+        // The feed is not internally consistent (impossible bars, wrapped negative
+        // volume sentinels) — repair before anything downstream sees the rows.
+        CandleSanitizer.Clean(rows);
         return rows;
     }
 

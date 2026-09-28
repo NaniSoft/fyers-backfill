@@ -44,6 +44,16 @@ public sealed class UniverseBuilder(BackfillConfig cfg, FyersClient client, ILog
             instruments.AddRange(MasterScanner.Scan(cmPath, "CM")
                 .Where(i => i.Kind == Instrument.KindEquity));
             log.LogInformation("universe: {Count} cash equities from NSE_CM", instruments.Count);
+            _existingSymbols = instruments.Select(i => i.Symbol).ToHashSet(StringComparer.Ordinal);
+        }
+
+        if (cfg.UniverseEquities && cfg.UniverseHistoricalEquities)
+        {
+            var before = instruments.Count;
+            var historical = HistoricalEquities();
+            instruments.AddRange(historical);
+            log.LogInformation("universe: {Count} historical (renamed) equity tickers from {Path}",
+                instruments.Count - before, HistoricalPath);
         }
 
         if (cfg.UniverseFutures || cfg.UniverseOptions)
@@ -72,6 +82,86 @@ public sealed class UniverseBuilder(BackfillConfig cfg, FyersClient client, ILog
         log.LogInformation("universe: {Total} instruments after whitelist", filtered.Count);
         return filtered;
     }
+
+    /// <summary>
+    /// The <em>former</em> tickers of equities that have since been renamed, taken
+    /// from the shared <c>isin_symbol_map.json</c> (<c>isin2hist</c>). The NSE_CM
+    /// master only carries the current ticker, so without this a renamed stock has no
+    /// history for the years before the rename — validation found 298 ISINs in exactly
+    /// that state, 8 of them with no data whatsoever.
+    ///
+    /// Each name becomes a normal <c>NSE:&lt;SYMBOL&gt;-EQ</c> instrument; the
+    /// backfill runner's existing <c>-EQ</c>→<c>-BE</c> fallback still applies, and an
+    /// old ticker Fyers no longer serves simply comes back as an error recorded in the
+    /// ledger rather than a silent gap.
+    /// </summary>
+    private IReadOnlyList<Instrument> HistoricalEquities()
+    {
+        if (!File.Exists(HistoricalPath))
+        {
+            log.LogWarning("universe: historical equity map not found at {Path} — "
+                           + "renamed tickers will be missing", HistoricalPath);
+            return [];
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(File.ReadAllText(HistoricalPath));
+            if (!doc.RootElement.TryGetProperty("isin2hist", out var hist))
+                return [];
+
+            var instruments = new List<Instrument>();
+            foreach (var isin in hist.EnumerateObject())
+            {
+                var isinVal = isin.Name;
+                if (isin.Value.ValueKind == JsonValueKind.Object
+                    && isin.Value.TryGetProperty("isin", out var v)
+                    && v.ValueKind == JsonValueKind.String)
+                    isinVal = v.GetString() ?? isin.Name;
+
+                foreach (var era in isin.Value.EnumerateArray())
+                {
+                    if (era.ValueKind != JsonValueKind.Object
+                        || !era.TryGetProperty("symbol", out var sym)
+                        || sym.ValueKind != JsonValueKind.String)
+                        continue;
+                    var ticker = sym.GetString();
+                    if (string.IsNullOrWhiteSpace(ticker) || string.IsNullOrWhiteSpace(isinVal))
+                        continue;
+                    // Bound the work to the era: the ticker did not exist outside it.
+                    instruments.Add(new Instrument($"NSE:{ticker}-EQ", Instrument.KindEquity,
+                        Isin: isinVal, Segment: "CM",
+                        WindowFrom: ParseDate(era, "from_date"),
+                        WindowTo: ParseDate(era, "to_date")));
+                }
+            }
+
+            // The master already covers the current ticker — keep only names we do
+            // not already have, so a rename that is still listed is not pulled twice.
+            var existing = _existingSymbols;
+            return existing is null
+                ? instruments
+                : instruments.Where(i => !existing.Contains(i.Symbol)).ToList();
+        }
+        catch (Exception e)
+        {
+            log.LogWarning("universe: historical equity map unreadable: {Message}", e.Message);
+            return [];
+        }
+    }
+
+    private HashSet<string>? _existingSymbols;
+
+    private static DateOnly? ParseDate(JsonElement era, string name)
+        => era.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String
+           && DateOnly.TryParse(v.GetString(), out var d)
+            ? d
+            : null;
+
+    private string HistoricalPath => cfg.HistoricalEquitiesFile
+        ?? Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            "source", "repos", "trading", "isin", "isin_symbol_map.json");
 
     /// <summary>
     /// Expired contracts, cached at <c>&lt;master_cache&gt;/expired_universe.json</c>.

@@ -129,7 +129,32 @@ backfill:
     options: true
     expired: true
     underlyings: []           # [] = all; else stems, e.g. [NIFTY, RELIANCE]
+    historical_equities: true # also pull the FORMER tickers of renamed equities
 ```
+
+## Data quality — what the feed gets wrong
+
+Fyers' 1-minute feed is not internally consistent, and a validation pass over
+3.75M aggregated daily bars against an independent EOD reference (2026-09-28)
+found three classes of defect. `Fyers.Core.Fyers.CandleSanitizer` repairs all of
+them in the ingest path, so nothing downstream sees a bad bar:
+
+| defect | measured | repair |
+|---|---|---|
+| Impossible bars — `JISLDVREQS 2017-11-10 09:15` came back `open=73.00, high=72.00` | 10,424 days / 1,541 ISINs | `high = max(o,h,l,c)`, `low = min(o,h,l,c)` |
+| Volume sentinels — a negative volume arrives wrapped and multiplied (`429496726000` = `2^32·100 − 3600`); GOLDBEES hit 2.1e12 in one day | 3,234 days / 1,124 ISINs | `volume < 0 or > 1e9` → 0 |
+| Non-positive prices | 954 days / 517 ISINs | the bar is dropped |
+
+Open/high/low match an independent reference **exactly**; the close differs by a
+few ticks on roughly half of days for non-mega-caps (the last one-minute bar's
+close vs the official closing price — definitional, not corruption), and volume
+runs ~0.2% under the official total.
+
+Renamed equities are a coverage problem rather than a data problem: the NSE_CM
+master only lists the current ticker, so a stock that traded as `RUCHI` until
+2022-07-12 had no history at all under `PATANJALI`. `historical_equities` adds
+every former ticker from `isin_symbol_map.json`, each bounded to its own era, so
+it costs a handful of requests per name instead of a full sweep.
 
 ## How it stays within Fyers' limits
 

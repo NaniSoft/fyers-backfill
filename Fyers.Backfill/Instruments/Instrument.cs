@@ -15,6 +15,10 @@ namespace Fyers.Backfill.Instruments;
 /// <param name="OptionType">CE / PE for options.</param>
 /// <param name="Segment">CM | FO (the master the instrument came from).</param>
 /// <param name="Expired">True when discovered via the expired-contract endpoints.</param>
+/// <param name="WindowFrom">Earliest date worth requesting, when the instrument's life is
+/// known (an expired contract's run-up, or the era a renamed equity traded under).
+/// Null = the whole configured range.</param>
+/// <param name="WindowTo">Latest date worth requesting; see <paramref name="WindowFrom"/>.</param>
 public sealed record Instrument(
     string Symbol,
     string Kind,
@@ -24,7 +28,9 @@ public sealed record Instrument(
     decimal? Strike = null,
     string? OptionType = null,
     string Segment = "CM",
-    bool Expired = false)
+    bool Expired = false,
+    DateOnly? WindowFrom = null,
+    DateOnly? WindowTo = null)
 {
     public const string KindEquity = "EQ";
     public const string KindFuture = "FUTURE";
