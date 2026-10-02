@@ -1598,6 +1598,7 @@ public sealed class ValidateCommand(
     {
         if (!Directory.Exists(datasetDir) || !Directory.Exists(eod2Dir))
             return 2;   // config/path error (spec §Commands exit codes)
+        Directory.CreateDirectory(validationDir);   // --accept-baseline writes the baseline before any report
 
         var reference = new Eod2Reference(eod2Dir);
         var known = KnownIssues.Load(Path.Combine(validationDir, "known_issues.csv"));
