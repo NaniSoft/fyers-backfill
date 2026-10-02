@@ -154,3 +154,102 @@ public sealed class ValidateCommandTests
         finally { Directory.Delete(dataset, true); Directory.Delete(eod2, true); Directory.Delete(validation, true); }
     }
 }
+
+public sealed class OrganizerTests
+{
+    private static string TempDir(string tag)
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"fb-org-{tag}-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
+
+    private static async Task WriteMinuteFile(string path, (long ts, double close, long volume)[] minutes,
+        string symbol = "NSE:X-EQ")
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var rows = minutes.Select(m => new CandleRowDto
+        {
+            symbol = symbol, isin = null, instrument_type = "EQ", ts_utc = m.ts,
+            ist_minute = "", open = m.close, high = m.close, low = m.close,
+            close = m.close, volume = m.volume, resolution = "1",
+        }).ToList();
+        await using var fs = File.Create(path);
+        await ParquetSerializer.SerializeAsync(rows, fs, null!, null!, CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task Maps_via_symbol_map_and_merges_into_the_isin_dir()
+    {
+        var pull = TempDir("pull");
+        var dataset = TempDir("ds");
+        var mapPath = Path.Combine(TempDir("map"), "map.json");
+        try
+        {
+            await WriteMinuteFile(Path.Combine(pull, "NSE_X-EQ.parquet"), [(1790653500, 100.5, 1_000)]);
+            File.WriteAllText(mapPath, """{"sym2isin": {"X": "INE0000000001"}}""");
+
+            var result = await new Organizer(pull, dataset, mapPath).RunAsync(CancellationToken.None);
+
+            Assert.Equal(1, result.MappedFiles);
+            Assert.Empty(result.LeftInPlace);
+            var target = Path.Combine(dataset, "INE0000000001", "cash", "NSE_X-EQ.parquet");
+            Assert.True(File.Exists(target));
+            Assert.False(File.Exists(Path.Combine(pull, "NSE_X-EQ.parquet")));   // consumed
+        }
+        finally { Directory.Delete(pull, true); Directory.Delete(dataset, true); File.Delete(mapPath); }
+    }
+
+    [Fact]
+    public async Task Existing_target_merges_without_duplicates()
+    {
+        var pull = TempDir("pull");
+        var dataset = TempDir("ds");
+        var mapPath = Path.Combine(TempDir("map"), "map.json");
+        try
+        {
+            // Seed the target with BOTH the colliding minute (at a distinct close,
+            // so last-write-wins is visible) and a minute the pull does NOT carry
+            // (so replacing instead of merging is visible). One call — a second
+            // WriteMinuteFile on the same path would truncate the first.
+            await WriteMinuteFile(Path.Combine(dataset, "INE0000000001", "cash", "NSE_X-EQ.parquet"),
+                [(1790653500, 42.0, 1_000), (1790653620, 55.0, 2_000)]);
+            // The pull file: the colliding minute plus a brand-new one.
+            await WriteMinuteFile(Path.Combine(pull, "NSE_X-EQ.parquet"),
+                [(1790653500, 100.5, 1_000), (1790653560, 101.0, 500)]);
+            File.WriteAllText(mapPath, """{"sym2isin": {"X": "INE0000000001"}}""");
+
+            var result = await new Organizer(pull, dataset, mapPath).RunAsync(CancellationToken.None);
+
+            Assert.Equal(3, result.MergedRows);
+            var rows = await CandleStore.ReadAsync(
+                Path.Combine(dataset, "INE0000000001", "cash", "NSE_X-EQ.parquet"), CancellationToken.None);
+            Assert.Equal(3, rows.Count);                       // no duplicate ts_utc
+            Assert.Equal(100.5, rows.Single(r => r.ts_utc == 1790653500).close);  // pull wins
+            Assert.Equal(101.0, rows.Single(r => r.ts_utc == 1790653560).close);  // pull-only minute
+            Assert.Equal(55.0, rows.Single(r => r.ts_utc == 1790653620).close);   // target-only survives
+        }
+        finally { Directory.Delete(pull, true); Directory.Delete(dataset, true); File.Delete(mapPath); }
+    }
+
+    [Fact]
+    public async Task Unmappable_and_fno_files_stay_in_place()
+    {
+        var pull = TempDir("pull");
+        var dataset = TempDir("ds");
+        var mapPath = Path.Combine(TempDir("map"), "map.json");
+        try
+        {
+            await WriteMinuteFile(Path.Combine(pull, "NSE_UNKNOWN-EQ.parquet"), [(1, 1, 1)]);
+            await WriteMinuteFile(Path.Combine(pull, "NSE_NIFTY26AUGFUT.parquet"), [(1, 1, 1)],
+                "NSE:NIFTY26AUGFUT");
+            File.WriteAllText(mapPath, """{"sym2isin": {}}""");
+
+            var result = await new Organizer(pull, dataset, mapPath).RunAsync(CancellationToken.None);
+
+            Assert.Equal(0, result.MappedFiles);
+            Assert.Equal(2, result.LeftInPlace.Count);
+        }
+        finally { Directory.Delete(pull, true); Directory.Delete(dataset, true); File.Delete(mapPath); }
+    }
+}
