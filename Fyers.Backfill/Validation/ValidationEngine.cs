@@ -18,7 +18,9 @@ public sealed record ValidationOptions(
 
 /// <summary>The comparison pass (spec §Join, §Tolerances, §Known-issues): joins
 /// our daily bars to the reference by ISIN, buckets coverage, tags split
-/// factors, applies the tolerances, subtracts the baseline.</summary>
+/// factors, applies the tolerances, subtracts the baseline. Reference days are
+/// retained only for ISINs we carry — the rest keep a traded-day count, so the
+/// full reference set is never held in memory.</summary>
 public static class ValidationEngine
 {
     public static ValidationResult Validate(
@@ -29,12 +31,20 @@ public static class ValidationEngine
     {
         // stem → our ISIN, for the four coverage buckets.
         var refByIsin = new Dictionary<string, List<ReferenceDay>>();
+        var refTraded = new Dictionary<string, int>();      // eod2_only: count, not days
         var refUnmapped = new List<string>();
         foreach (var stem in reference.Stems)
         {
             if (!reference.StemToIsin.TryGetValue(stem, out var isin))
             {
                 refUnmapped.Add(stem);              // ref_unmapped — report-only
+                continue;
+            }
+            if (!oursByIsin.ContainsKey(isin))
+            {
+                // eod2_only — a traded-day count is all the bucket needs.
+                refTraded[isin] = reference.Days(stem)
+                    .Count(d => d.Date >= options.Floor && ValidationRules.ReferenceTraded(d));
                 continue;
             }
             if (!refByIsin.TryGetValue(isin, out var list))
@@ -47,19 +57,20 @@ public static class ValidationEngine
         var baselineCount = 0;
         var extraDayCount = 0;
 
-        foreach (var isin in oursByIsin.Keys.Concat(refByIsin.Keys).Distinct().OrderBy(x => x, StringComparer.Ordinal))
+        foreach (var isin in oursByIsin.Keys.Concat(refByIsin.Keys).Concat(refTraded.Keys)
+                     .Distinct().OrderBy(x => x, StringComparer.Ordinal))
         {
             var ours = oursByIsin.TryGetValue(isin, out var o) ? o : [];
             var referenceDays = refByIsin.TryGetValue(isin, out var r) ? r : [];
-            var byDate = referenceDays.ToDictionary(d => d.Date);
 
-            if (ours.Count == 0 && referenceDays.Count > 0)
+            if (ours.Count == 0 && (refTraded.ContainsKey(isin) || referenceDays.Count > 0))
             {
-                var traded = referenceDays.Where(d => d.Date >= options.Floor && ValidationRules.ReferenceTraded(d)).ToList();
-                coverage.Add(new CoverageRow(isin, "eod2_only", 0, traded.Count, ""));
-                if (traded.Count > 0)
-                    anomalies.Add(new Anomaly("missing_isin", isin, null, null, traded.Count,
-                        FormattableString.Invariant($"{traded.Count} traded reference days since floor")));
+                var traded = refTraded.TryGetValue(isin, out var t) ? t
+                    : referenceDays.Count(d => d.Date >= options.Floor && ValidationRules.ReferenceTraded(d));
+                coverage.Add(new CoverageRow(isin, "eod2_only", 0, traded, ""));
+                if (traded > 0)
+                    anomalies.Add(new Anomaly("missing_isin", isin, null, null, traded,
+                        FormattableString.Invariant($"{traded} traded reference days since floor")));
                 continue;
             }
             if (ours.Count > 0 && referenceDays.Count == 0)
@@ -68,6 +79,15 @@ public static class ValidationEngine
                 continue;
             }
 
+            // One date can carry both an EQ and a BE row; EQ wins (the same rule
+            // as the stem→ISIN map), which also keeps the join collision-free.
+            var byDate = new Dictionary<DateOnly, ReferenceDay>();
+            foreach (var d in referenceDays)
+                if (d.Series == "EQ" || !byDate.ContainsKey(d.Date))
+                    byDate[d.Date] = d;
+
+            var ourDates = ours.Select(b => b.Date).ToHashSet();
+
             // split-factor: a constant ratio outside the band on enough common
             // days means a corporate action hit one side only — compare nothing.
             var common = ours.Where(b => byDate.ContainsKey(b.Date)).ToList();
@@ -75,7 +95,6 @@ public static class ValidationEngine
                       && (ratio < options.SplitFactorLow || ratio > options.SplitFactorHigh)
                 ? "split_factor" : "";
 
-            var missing = 0;
             foreach (var bar in ours)
             {
                 if (!byDate.TryGetValue(bar.Date, out var refDay))
@@ -90,14 +109,14 @@ public static class ValidationEngine
                     else anomalies.Add(a);
                 }
             }
-            missing = referenceDays.Count(d => d.Date >= options.Floor
-                                            && ValidationRules.ReferenceTraded(d)
-                                            && !ours.Any(b => b.Date == d.Date));
+            var missing = referenceDays.Count(d => d.Date >= options.Floor
+                                               && ValidationRules.ReferenceTraded(d)
+                                               && !ourDates.Contains(d.Date));
 
             if (missing > 0 && tag != "split_factor")
                 foreach (var d in referenceDays.Where(d => d.Date >= options.Floor
                                                         && ValidationRules.ReferenceTraded(d)
-                                                        && !ours.Any(b => b.Date == d.Date)))
+                                                        && !ourDates.Contains(d.Date)))
                 {
                     var a = new Anomaly("missing_day", isin, d.Date, null, d.Volume, "no bar of ours");
                     if (known.Contains(a)) baselineCount++; else anomalies.Add(a);

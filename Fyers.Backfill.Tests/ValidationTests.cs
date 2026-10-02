@@ -514,4 +514,26 @@ public sealed class ValidationEngineTests
         Assert.Empty(result.NewAnomalies);                 // informational only
         Assert.Equal(1, result.ExtraDayCount);
     }
+
+    [Fact]
+    public void Duplicate_reference_dates_keep_the_eq_row()
+    {
+        // A stem can carry both an EQ and a BE row for the same date; EQ wins.
+        var reference = RefWith(
+            new() { ["sbin"] = "INE1" },
+            new() { ["sbin"] =
+            [
+                new ReferenceDay(Day, 100, 101, 99, 100, 1_000, "BE"),
+                new ReferenceDay(Day, 200, 201, 199, 200, 2_000, "EQ"),
+            ] });
+        var ours = new Dictionary<string, List<DailyBar>>
+        {
+            ["INE1"] = [new DailyBar(Day, 200, 201, 199, 200, 2_000, 375, "09:15", "15:29")],
+        };
+
+        var result = ValidationEngine.Validate(ours, reference, new KnownIssues(),
+            new ValidationOptions(new DateOnly(2017, 7, 3)));
+
+        Assert.Empty(result.NewAnomalies);   // matches the EQ row, not the BE row
+    }
 }
