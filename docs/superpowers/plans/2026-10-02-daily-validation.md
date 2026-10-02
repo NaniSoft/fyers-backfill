@@ -273,7 +273,7 @@ git commit -m "Aggregate 1-minute bars to IST daily bars"
     - `public List<DailyBar> ReadIsin(IsinSource src)` — that file's cached daily bars, empty when none.
     - `public void WriteIsin(IsinSource src, IReadOnlyList<DailyBar> bars)` — writes cache parquet + updates state atomically.
 - Cache layout (spec, as amended): `<validationDir>/cache/<ISIN>~<file-stem>.parquet`, `<validationDir>/state.json` (per-file fingerprints).
-- Downstream merge: `DailyAggregator.MergeFiles(IEnumerable<IEnumerable<DailyBar>>)` (Task 2 file) folds an ISIN's per-file daily bars into one bar per day (volume/bars sum, high max, low min, open from earliest first-minute, close from latest last-minute).
+- Downstream merge: `DailyAggregator.MergeFiles(IEnumerable<IEnumerable<DailyBar>>)` (Task 2 file) folds an ISIN's per-file daily bars into one bar per IST date — **date-level single-winner, EQ-file-preferred**: a date carried by several files takes the bar of the first file (callers pass EQ first, via `SeriesKey`) because Fyers serves the same sessions under both a stock's EQ and BE tickers, and the reference side dedupes duplicate dates EQ-first as well. Field-wise summing was measured to double volume on ALMONDZ/VISAKAIND (387/321 fully-overlapping days).
 
 - [ ] **Step 1: Write the failing tests**
 
