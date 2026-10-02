@@ -241,3 +241,70 @@ public sealed class Eod2ReferenceTests
         finally { Directory.Delete(dir, true); }
     }
 }
+
+public sealed class ValidationRulesTests
+{
+    private static readonly DateOnly Day = new(2026, 9, 28);
+
+    private static DailyBar Ours(double o, double h, double l, double c, long v) =>
+        new(Day, o, h, l, c, v, 375, "09:15", "15:29");
+
+    private static ReferenceDay Ref(double o, double h, double l, double c, double v) =>
+        new(Day, o, h, l, c, v, "EQ");
+
+    [Fact]
+    public void Matching_day_produces_no_anomaly()
+    {
+        var anomalies = ValidationRules.CompareDay("I1", Day,
+            Ours(810.0, 815.5, 808.2, 812.3, 4_470_000), Ref(810.0, 815.5, 808.2, 812.0, 4_500_000));
+        Assert.Empty(anomalies);   // close 812.3 vs 812.0 = 0.037%, volume −0.67%
+    }
+
+    [Fact]
+    public void Tick_rounding_applies_to_open_high_low()
+    {
+        // ours 810.005 rounds to 810.00/810.01 — the tick test treats 810.0 vs 810.004 as equal
+        Assert.True(ValidationRules.SameTick(810.004, 810.0));
+        Assert.False(ValidationRules.SameTick(810.004, 810.01));
+    }
+
+    [Fact]
+    public void One_tick_off_high_is_an_anomaly()
+    {
+        var anomalies = ValidationRules.CompareDay("I1", Day,
+            Ours(810.0, 815.51, 808.2, 812.3, 4_500_000), Ref(810.0, 815.5, 808.2, 812.0, 4_500_000));
+        var a = Assert.Single(anomalies);
+        Assert.Equal("ohlc_high", a.Kind);
+        Assert.Equal(815.51, a.Ours);
+        Assert.Equal(815.5, a.Reference);
+    }
+
+    [Fact]
+    public void Close_exactly_at_tolerance_passes_above_fails()
+    {
+        // 0.5% of 800 = 4.0 → close 804.0 passes, 804.01 fails
+        Assert.Empty(ValidationRules.CompareDay("I1", Day,
+            Ours(800, 801, 799, 804.0, 100), Ref(800, 801, 799, 800, 100)));
+        Assert.Equal("close", Assert.Single(ValidationRules.CompareDay("I1", Day,
+            Ours(800, 801, 799, 804.01, 100), Ref(800, 801, 799, 800, 100))).Kind);
+    }
+
+    [Fact]
+    public void Volume_exactly_at_tolerance_passes_above_fails()
+    {
+        // 1% of 1000 = 10 → 990 passes, 989 fails
+        Assert.Empty(ValidationRules.CompareDay("I1", Day,
+            Ours(800, 801, 799, 800, 990), Ref(800, 801, 799, 800, 1_000)));
+        Assert.Equal("volume", Assert.Single(ValidationRules.CompareDay("I1", Day,
+            Ours(800, 801, 799, 800, 989), Ref(800, 801, 799, 800, 1_000))).Kind);
+    }
+
+    [Fact]
+    public void All_four_prices_can_fail_at_once()
+    {
+        var anomalies = ValidationRules.CompareDay("I1", Day,
+            Ours(10, 20, 5, 15, 1_000), Ref(11, 21, 6, 16, 2_000));
+        Assert.Equal(["ohlc_open", "ohlc_high", "ohlc_low", "close", "volume"],
+            anomalies.Select(a => a.Kind).ToArray());
+    }
+}
