@@ -561,3 +561,56 @@ public sealed class ValidationEngineTests
         Assert.Equal(1, result.Coverage.Single().MissingDays);
     }
 }
+
+public sealed class ReportWriterTests
+{
+    private static string TempDir()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "fb-rw-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
+
+    [Fact]
+    public void Writes_report_and_csvs_and_returns_zero_when_clean()
+    {
+        var dir = TempDir();
+        try
+        {
+            var result = new ValidationResult(
+                [new CoverageRow("INE1", "both", 10, 0, "")], [], 0, 0);
+
+            var code = ReportWriter.Write(dir, new DateOnly(2026, 10, 2), result, null);
+
+            Assert.Equal(0, code);
+            Assert.Contains("report-2026-10-02.md", Directory.GetFiles(dir).Select(Path.GetFileName));
+            Assert.Contains("anomalies-2026-10-02.csv", Directory.GetFiles(dir).Select(Path.GetFileName));
+            Assert.Contains("isin_coverage-2026-10-02.csv", Directory.GetFiles(dir).Select(Path.GetFileName));
+            Assert.Contains("both", File.ReadAllText(Path.Combine(dir, "isin_coverage-2026-10-02.csv")));
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void New_anomalies_land_in_the_csv_and_flip_the_exit_code()
+    {
+        var dir = TempDir();
+        try
+        {
+            var result = new ValidationResult(
+                [new CoverageRow("INE1", "both", 10, 1, "")],
+                [new Anomaly("missing_day", "INE1", new DateOnly(2026, 9, 28), null, 5_000, "no bar of ours")],
+                2, 3);
+
+            var code = ReportWriter.Write(dir, new DateOnly(2026, 10, 2), result, null);
+
+            Assert.Equal(1, code);
+            var csv = File.ReadAllText(Path.Combine(dir, "anomalies-2026-10-02.csv"));
+            Assert.Contains("missing_day,INE1,2026-09-28", csv);
+            var md = File.ReadAllText(Path.Combine(dir, "report-2026-10-02.md"));
+            Assert.Contains("missing_day", md);
+            Assert.Contains("2", md);   // baseline count appears in the header
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+}
