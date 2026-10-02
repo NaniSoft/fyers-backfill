@@ -20,20 +20,30 @@ public sealed class ValidateCommand(
         var cache = new AggregationCache(validationDir);
 
         var oursByIsin = new Dictionary<string, List<DailyBar>>();
+        var fileBars = new Dictionary<string, List<List<DailyBar>>>();
         foreach (var src in DiscoverCashSources(datasetDir))
         {
             List<DailyBar> bars;
             if (cache.IsCurrent(src))
             {
-                bars = cache.ReadIsin(src.Isin);
+                bars = cache.ReadIsin(src);
             }
             else
             {
                 bars = DailyAggregator.Aggregate(await CandleStore.ReadAsync(src.Path, ct));
-                cache.WriteIsin(src.Isin, bars, src);
+                cache.WriteIsin(src, bars);
             }
-            if (bars.Count > 0) oursByIsin[src.Isin] = bars;
+            if (bars.Count == 0) continue;
+            if (!fileBars.TryGetValue(src.Isin, out var lists))
+                fileBars[src.Isin] = lists = [];
+            lists.Add(bars);
         }
+
+        // An ISIN's files are merged in memory every run (only the aggregation is
+        // cached), so a series file added later joins the day it belongs to
+        // instead of overwriting the ISIN's earlier bars.
+        foreach (var (isin, lists) in fileBars)
+            oursByIsin[isin] = lists.Count == 1 ? lists[0] : DailyAggregator.MergeFiles(lists);
 
         var result = ValidationEngine.Validate(oursByIsin, reference, known,
             new ValidationOptions(floor));
@@ -52,7 +62,9 @@ public sealed class ValidateCommand(
         TimeZoneInfo.ConvertTimeBySystemTimeZoneId(DateTime.UtcNow, "Asia/Kolkata"));
 
     /// <summary>Every cash parquet: <c>&lt;dataset&gt;/&lt;ISIN&gt;/cash/*.parquet</code>,
-    /// ISIN taken from the directory name (self-healing — no stale manifest).</summary>
+    /// ISIN taken from the directory name (self-healing — no stale manifest). Files
+    /// of one ISIN are grouped together and ordered EQ first, then by name, so the
+    /// per-file merge is deterministic and never depends on directory order.</summary>
     public static IReadOnlyList<IsinSource> DiscoverCashSources(string datasetDir)
     {
         if (!Directory.Exists(datasetDir)) return [];
@@ -66,6 +78,20 @@ public sealed class ValidateCommand(
             foreach (var f in Directory.EnumerateFiles(cash, "*.parquet"))
                 sources.Add(IsinSource.Of(isin, f));
         }
-        return sources.OrderBy(s => s.Isin, StringComparer.Ordinal).ToList();
+        return sources.OrderBy(s => s.Isin, StringComparer.Ordinal)
+            .ThenBy(SeriesKey, StringComparer.Ordinal)                 // EQ first: anchors a merged day
+            .ThenBy(s => s.Path, StringComparer.Ordinal)
+            .ToList();
+    }
+
+    /// <summary>Sort key ordering an ISIN's files EQ first (the primary session,
+    /// which anchors a merged day's open), every other series after it by name:
+    /// "" sorts before any series name, so EQ maps to "".</summary>
+    private static string SeriesKey(IsinSource s)
+    {
+        var stem = Path.GetFileNameWithoutExtension(s.Path);
+        var dash = stem.LastIndexOf('-');
+        var series = dash >= 0 ? stem[(dash + 1)..] : "";
+        return series == "EQ" ? "" : series;
     }
 }

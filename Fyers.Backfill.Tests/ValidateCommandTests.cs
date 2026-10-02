@@ -86,8 +86,65 @@ public sealed class ValidateCommandTests
             Assert.Equal(0, await command.RunAsync(CancellationToken.None));
             Assert.Equal(0, await command.RunAsync(CancellationToken.None));   // cache path
 
-            var cache = Path.Combine(validation, "cache", "INE0000000001.parquet");
+            var cache = Path.Combine(validation, "cache", "INE0000000001~NSE_X-EQ.parquet");
             Assert.True(File.Exists(cache));
+        }
+        finally { Directory.Delete(dataset, true); Directory.Delete(eod2, true); Directory.Delete(validation, true); }
+    }
+
+    [Fact]
+    public async void Two_ticker_files_merge_into_one_isin_day()
+    {
+        var dataset = TempDir("ds");
+        var eod2 = TempDir("eod");
+        var validation = TempDir("val");
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(eod2, "daily"));
+            var isinDir = Path.Combine(dataset, "INE0000000001", "cash");
+            await WriteMinuteFile(Path.Combine(isinDir, "NSE_X-EQ.parquet"),
+                [(1790567100, 100, 101, 99, 100.5, 1_000)]);      // 09:15 IST
+            await WriteMinuteFile(Path.Combine(isinDir, "NSE_X-BE.parquet"),
+                [(1790589540, 100.6, 102, 100, 101.0, 500)]);     // 15:29 IST
+            File.WriteAllLines(Path.Combine(eod2, "isin.csv"),
+                ["ISIN,SYMBOL,SERIES", "INE0000000001,X,EQ"]);
+            File.WriteAllLines(Path.Combine(eod2, "daily", "x.csv"),
+                ["Date,Open,High,Low,Close,Volume,Series",
+                 "2026-09-28,100,102,99,101,1500,EQ"]);
+
+            var command = new ValidateCommand(dataset, eod2, validation,
+                new DateOnly(2017, 7, 3), acceptBaseline: false);
+
+            Assert.Equal(0, await command.RunAsync(CancellationToken.None));  // merged day matches
+        }
+        finally { Directory.Delete(dataset, true); Directory.Delete(eod2, true); Directory.Delete(validation, true); }
+    }
+
+    [Fact]
+    public async void Second_file_added_later_is_picked_up_without_losing_the_first()
+    {
+        var dataset = TempDir("ds");
+        var eod2 = TempDir("eod");
+        var validation = TempDir("val");
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(eod2, "daily"));
+            var isinDir = Path.Combine(dataset, "INE0000000001", "cash");
+            await WriteMinuteFile(Path.Combine(isinDir, "NSE_X-EQ.parquet"),
+                [(1790567100, 100, 101, 99, 100.5, 1_000)]);
+            File.WriteAllLines(Path.Combine(eod2, "isin.csv"),
+                ["ISIN,SYMBOL,SERIES", "INE0000000001,X,EQ"]);
+            File.WriteAllLines(Path.Combine(eod2, "daily", "x.csv"),
+                ["Date,Open,High,Low,Close,Volume,Series",
+                 "2026-09-28,100,102,99,101,1500,EQ"]);
+
+            var command = new ValidateCommand(dataset, eod2, validation,
+                new DateOnly(2017, 7, 3), acceptBaseline: false);
+            Assert.Equal(1, await command.RunAsync(CancellationToken.None));  // BE volume missing → missing_day
+
+            await WriteMinuteFile(Path.Combine(isinDir, "NSE_X-BE.parquet"),
+                [(1790589540, 100.6, 102, 100, 101.0, 500)]);     // arrives later
+            Assert.Equal(0, await command.RunAsync(CancellationToken.None));  // now complete
         }
         finally { Directory.Delete(dataset, true); Directory.Delete(eod2, true); Directory.Delete(validation, true); }
     }

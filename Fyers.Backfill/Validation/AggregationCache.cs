@@ -57,8 +57,10 @@ internal sealed class DailyBarDto
 }
 
 /// <summary>The incremental daily-bar cache (spec §Incremental cache): one parquet
-/// per ISIN under <c>cache/</c>, fingerprints in <c>state.json</c>. Re-aggregate
-/// only what changed; a killed sweep just finishes next run.</summary>
+/// per source FILE under <c>cache/</c> (an ISIN can carry several — EQ and BE
+/// series land as separate files), fingerprints in <c>state.json</c> keyed by
+/// <c>isin::filename</c>. Re-aggregate only what changed; a killed sweep just
+/// finishes next run.</summary>
 public sealed class AggregationCache(string validationDir)
 {
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true };
@@ -68,16 +70,25 @@ public sealed class AggregationCache(string validationDir)
 
     private CacheState? _state;
 
+    /// <summary>state.json's key for one source file: the ISIN plus the file name,
+    /// so two series files of the same ISIN never evict each other's fingerprint
+    /// (a per-ISIN key made the second file's write drop the first's). Renaming a
+    /// ticker leaves the old key behind — harmless, just an orphaned entry.</summary>
+    internal static string StateKey(IsinSource src) => src.Isin + "::" + Path.GetFileName(src.Path);
+
+    private string CachePath(IsinSource src) =>
+        Path.Combine(CacheDir, src.Isin + "~" + Path.GetFileNameWithoutExtension(src.Path) + ".parquet");
+
     public bool IsCurrent(IsinSource src)
     {
         _state ??= LoadState();
-        return _state.Isins.TryGetValue(src.Isin, out var e)
+        return _state.Isins.TryGetValue(StateKey(src), out var e)
                && e.Path == src.Path && e.Length == src.Length && e.LastWriteUtc == src.LastWriteUtc;
     }
 
-    public List<DailyBar> ReadIsin(string isin)
+    public List<DailyBar> ReadIsin(IsinSource src)
     {
-        var path = Path.Combine(CacheDir, isin + ".parquet");
+        var path = CachePath(src);
         if (!File.Exists(path)) return [];
         // Read as DailyBarDto — the cache parquet has this schema, NOT CandleRowDto's.
         using var fs = File.OpenRead(path);
@@ -86,10 +97,10 @@ public sealed class AggregationCache(string validationDir)
         return result.Data.Select(ToBar).ToList();
     }
 
-    public void WriteIsin(string isin, IReadOnlyList<DailyBar> bars, IsinSource src)
+    public void WriteIsin(IsinSource src, IReadOnlyList<DailyBar> bars)
     {
         Directory.CreateDirectory(CacheDir);
-        var path = Path.Combine(CacheDir, isin + ".parquet");
+        var path = CachePath(src);
         var rows = bars.Select(ToDto).ToList();
         var tmp = path + ".tmp";
         using (var fs = File.Create(tmp))
@@ -98,7 +109,7 @@ public sealed class AggregationCache(string validationDir)
         File.Move(tmp, path, overwrite: true);
 
         _state ??= LoadState();
-        _state.Isins[isin] = new CacheStateEntry(src.Path, src.Length, src.LastWriteUtc);
+        _state.Isins[StateKey(src)] = new CacheStateEntry(src.Path, src.Length, src.LastWriteUtc);
         var tmpState = StatePath + ".tmp";
         File.WriteAllText(tmpState, JsonSerializer.Serialize(_state, JsonOpts));
         File.Move(tmpState, StatePath, overwrite: true);
