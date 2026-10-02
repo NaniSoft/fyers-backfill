@@ -169,3 +169,75 @@ public sealed class AggregationCacheTests
         finally { Directory.Delete(dir, true); }
     }
 }
+
+public sealed class Eod2ReferenceTests
+{
+    private static string TempEod2()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "fb-eod2-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(Path.Combine(dir, "daily"));
+        return dir;
+    }
+
+    [Fact]
+    public void Maps_stems_preferring_the_eq_series_row()
+    {
+        var dir = TempEod2();
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "isin.csv"),
+                "ISIN,SYMBOL,SERIES,OPEN,HIGH,LOW,CLOSE,LAST,PREVCLOSE,TOTTRDQTY,TOTTRDVAL,TIMESTAMP,TOTALTRADES\n" +
+                "INE000A00001,SBIN,EQ,1,1,1,1,1,1,1,1,22-JUN-2011,1,\n" +
+                "INE000A00001,SBIN,BE,1,1,1,1,1,1,1,1,22-JUN-2011,1,\n");
+            File.WriteAllText(Path.Combine(dir, "meta.json"),
+                """{"lastUpdate": "2026-10-02T00:00:00+05:30"}""");
+
+            var reference = new Eod2Reference(dir);
+
+            Assert.Equal("INE000A00001", reference.StemToIsin["sbin"]);
+            Assert.Equal(new DateTime(2026, 10, 1, 18, 30, 0, DateTimeKind.Utc),
+                reference.LastUpdateUtc);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void Parses_daily_rows_and_skips_garbage_lines()
+    {
+        var dir = TempEod2();
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "daily", "sbin.csv"),
+                "Date,Open,High,Low,Close,Volume,Series,TOTAL_TRADES,QTY_PER_TRADE,DLV_QTY\n" +
+                "2026-09-28,810.0,815.5,808.2,812.3,4500000,EQ,,,\n" +
+                "not-a-date,1,2,3,4,5,EQ,,,\n" +
+                "2026-09-29,811.0,816.0,809.0,815.0,0,BE,,,\n");
+            File.WriteAllText(Path.Combine(dir, "isin.csv"),
+                "ISIN,SYMBOL,SERIES\nINE000A00001,SBIN,EQ\n");
+
+            var days = new Eod2Reference(dir).Days("sbin");
+
+            Assert.Equal(2, days.Count);
+            Assert.Equal(new DateOnly(2026, 9, 28), days[0].Date);
+            Assert.Equal(810.0, days[0].Open);
+            Assert.Equal(4_500_000, days[0].Volume);
+            Assert.Equal("EQ", days[0].Series);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void Missing_files_are_tolerated()
+    {
+        var dir = TempEod2();
+        try
+        {
+            var reference = new Eod2Reference(dir);
+            Assert.Empty(reference.StemToIsin);
+            Assert.Empty(reference.Stems);
+            Assert.Empty(reference.Days("absent"));
+            Assert.Null(reference.LastUpdateUtc);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+}
