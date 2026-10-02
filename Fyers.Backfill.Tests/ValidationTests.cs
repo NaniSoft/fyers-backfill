@@ -98,3 +98,69 @@ public sealed class DailyAggregatorTests
         Assert.Empty(DailyAggregator.Aggregate(Array.Empty<CandleRowDto>()));
     }
 }
+
+public sealed class AggregationCacheTests
+{
+    private static string TempDir()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "fb-cache-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
+
+    private static IsinSource Source(string path) => IsinSource.Of("INE000TEST000", path);
+
+    private static List<DailyBar> Bars() =>
+    [
+        new(new DateOnly(2026, 9, 28), 100, 101, 99, 100.5, 30, 2, "09:15", "15:29"),
+        new(new DateOnly(2026, 9, 29), 102, 103, 101, 102.5, 30, 1, "09:15", "09:15"),
+    ];
+
+    [Fact]
+    public void Roundtrips_bars_through_the_cache()
+    {
+        var dir = TempDir();
+        try
+        {
+            var cache = new AggregationCache(dir);
+            var src = Source(dir);
+            cache.WriteIsin("INE000TEST000", Bars(), src);
+
+            Assert.Equal(Bars(), cache.ReadIsin("INE000TEST000"));
+            Assert.True(cache.IsCurrent(src));   // same file fingerprint
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void Fingerprint_change_marks_cache_stale()
+    {
+        var dir = TempDir();
+        try
+        {
+            var file = Path.Combine(dir, "INE000TEST000.parquet");
+            File.WriteAllBytes(file, [1, 2, 3]);
+            var cache = new AggregationCache(dir);
+            cache.WriteIsin("INE000TEST000", Bars(), IsinSource.Of("INE000TEST000", file));
+
+            Assert.True(cache.IsCurrent(IsinSource.Of("INE000TEST000", file)));
+
+            File.WriteAllBytes(file, [1, 2, 3, 4]);   // any change → stale
+            Assert.False(cache.IsCurrent(IsinSource.Of("INE000TEST000", file)));
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void Unknown_isin_reads_empty_and_is_not_current()
+    {
+        var dir = TempDir();
+        try
+        {
+            var cache = new AggregationCache(dir);
+            Assert.Empty(cache.ReadIsin("INE000ABSENT000"));
+            Assert.False(cache.IsCurrent(Source(dir)));
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+}
