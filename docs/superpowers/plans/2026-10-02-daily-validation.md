@@ -269,11 +269,11 @@ git commit -m "Aggregate 1-minute bars to IST daily bars"
 - Produces:
   - `public sealed record IsinSource(string Isin, string Path, long Length, DateTime LastWriteUtc)` + `static IsinSource IsinSource.Of(string isin, string path)` (fingerprints from the file).
   - `public sealed class AggregationCache(string validationDir)`:
-    - `public bool IsCurrent(IsinSource src)` — true when the stored fingerprint matches.
-    - `public List<DailyBar> ReadIsin(string isin)` — cached bars, empty when none.
-    - `public void WriteIsin(string isin, IReadOnlyList<DailyBar> bars, IsinSource src)` — writes cache parquet + updates state atomically.
-    - `public IReadOnlyDictionary<string, List<IsinSource>> LoadState()` — for resumability checks (internal use).
-- Cache layout (spec): `<validationDir>/cache/<ISIN>.parquet`, `<validationDir>/state.json`.
+    - `public bool IsCurrent(IsinSource src)` — true when the stored fingerprint matches (identity is per FILE: `<ISIN>::<filename>` — an ISIN dir can hold several ticker files).
+    - `public List<DailyBar> ReadIsin(IsinSource src)` — that file's cached daily bars, empty when none.
+    - `public void WriteIsin(IsinSource src, IReadOnlyList<DailyBar> bars)` — writes cache parquet + updates state atomically.
+- Cache layout (spec, as amended): `<validationDir>/cache/<ISIN>~<file-stem>.parquet`, `<validationDir>/state.json` (per-file fingerprints).
+- Downstream merge: `DailyAggregator.MergeFiles(IEnumerable<IEnumerable<DailyBar>>)` (Task 2 file) folds an ISIN's per-file daily bars into one bar per day (volume/bars sum, high max, low min, open from earliest first-minute, close from latest last-minute).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1647,20 +1647,26 @@ public sealed class ValidateCommand(
         var cache = new AggregationCache(validationDir);
 
         var oursByIsin = new Dictionary<string, List<DailyBar>>();
+        var perIsinFiles = new Dictionary<string, List<List<DailyBar>>>();
         foreach (var src in DiscoverCashSources(datasetDir))
         {
             List<DailyBar> bars;
             if (cache.IsCurrent(src))
             {
-                bars = cache.ReadIsin(src.Isin);
+                bars = cache.ReadIsin(src);
             }
             else
             {
                 bars = DailyAggregator.Aggregate(await CandleStore.ReadAsync(src.Path, ct));
-                cache.WriteIsin(src.Isin, bars, src);
+                cache.WriteIsin(src, bars);
             }
-            if (bars.Count > 0) oursByIsin[src.Isin] = bars;
+            if (bars.Count == 0) continue;
+            if (!perIsinFiles.TryGetValue(src.Isin, out var lists))
+                perIsinFiles[src.Isin] = lists = [];
+            lists.Add(bars);
         }
+        foreach (var (isin, lists) in perIsinFiles)
+            oursByIsin[isin] = lists.Count == 1 ? lists[0] : DailyAggregator.MergeFiles(lists);
 
         var result = ValidationEngine.Validate(oursByIsin, reference, known,
             new ValidationOptions(floor));
