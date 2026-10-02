@@ -70,8 +70,12 @@ public static class ValidationEngine
                     : referenceDays.Count(d => d.Date >= options.Floor && ValidationRules.ReferenceTraded(d));
                 coverage.Add(new CoverageRow(isin, "eod2_only", 0, traded, ""));
                 if (traded > 0)
-                    anomalies.Add(new Anomaly("missing_isin", isin, null, null, traded,
-                        FormattableString.Invariant($"{traded} traded reference days since floor")));
+                {
+                    var a = new Anomaly("missing_isin", isin, null, null, traded,
+                        FormattableString.Invariant($"{traded} traded reference days since floor"));
+                    if (known.Contains(a)) baselineCount++;
+                    else anomalies.Add(a);
+                }
                 continue;
             }
             if (ours.Count > 0 && referenceDays.Count == 0)

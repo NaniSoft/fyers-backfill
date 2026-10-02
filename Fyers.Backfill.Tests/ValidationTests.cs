@@ -474,6 +474,25 @@ public sealed class ValidationEngineTests
     }
 
     [Fact]
+    public void Baselined_missing_isin_does_not_refire()
+    {
+        var reference = RefWith(
+            new() { ["tcs"] = "INE1" },
+            new() { ["tcs"] = [new ReferenceDay(Day, 1, 2, 0.5, 1.5, 500, "EQ")] });
+        var ours = new Dictionary<string, List<DailyBar>>();
+
+        var known = new KnownIssues();
+        known.Accept([new Anomaly("missing_isin", "INE1", null, null, 1, "")]);
+
+        var result = ValidationEngine.Validate(ours, reference, known,
+            new ValidationOptions(new DateOnly(2017, 7, 3)));
+
+        Assert.Empty(result.NewAnomalies);      // was 1 before the fix
+        Assert.Equal(1, result.BaselineCount);
+        Assert.Equal("eod2_only", Assert.Single(result.Coverage).Bucket);
+    }
+
+    [Fact]
     public void Baselined_anomalies_are_subtracted_and_counted()
     {
         var reference = RefWith(
