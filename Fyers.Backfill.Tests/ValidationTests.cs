@@ -536,4 +536,28 @@ public sealed class ValidationEngineTests
 
         Assert.Empty(result.NewAnomalies);   // matches the EQ row, not the BE row
     }
+
+    [Fact]
+    public void Missing_day_with_duplicate_series_rows_counts_once()
+    {
+        var day2 = new DateOnly(2026, 9, 29);
+        var reference = RefWith(
+            new() { ["sbin"] = "INE1" },
+            new() { ["sbin"] =
+            [
+                new ReferenceDay(Day, 100, 101, 99, 100, 1_000, "EQ"),
+                new ReferenceDay(day2, 100, 101, 99, 100, 5_000, "BE"),
+                new ReferenceDay(day2, 100, 101, 99, 100, 6_000, "EQ"),
+            ] });
+        var ours = new Dictionary<string, List<DailyBar>> { ["INE1"] = [Bar(Day, 100)] };
+
+        var result = ValidationEngine.Validate(ours, reference, new KnownIssues(),
+            new ValidationOptions(new DateOnly(2017, 7, 3)));
+
+        var missing = Assert.Single(result.NewAnomalies);          // ONE, not two
+        Assert.Equal("missing_day", missing.Kind);
+        Assert.Equal(day2, missing.Date);
+        Assert.Equal(6_000, missing.Reference);                    // the EQ row's volume
+        Assert.Equal(1, result.Coverage.Single().MissingDays);
+    }
 }

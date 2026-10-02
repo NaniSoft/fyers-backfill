@@ -43,8 +43,9 @@ public static class ValidationEngine
             if (!oursByIsin.ContainsKey(isin))
             {
                 // eod2_only — a traded-day count is all the bucket needs.
-                refTraded[isin] = reference.Days(stem)
+                var traded = reference.Days(stem)
                     .Count(d => d.Date >= options.Floor && ValidationRules.ReferenceTraded(d));
+                refTraded[isin] = refTraded.TryGetValue(isin, out var n) ? n + traded : traded;
                 continue;
             }
             if (!refByIsin.TryGetValue(isin, out var list))
@@ -109,20 +110,22 @@ public static class ValidationEngine
                     else anomalies.Add(a);
                 }
             }
-            var missing = referenceDays.Count(d => d.Date >= options.Floor
-                                               && ValidationRules.ReferenceTraded(d)
-                                               && !ourDates.Contains(d.Date));
+            // Missing days come from the EQ-deduped join, never the raw rows:
+            // a date can carry an EQ and a BE row and must count once, with the
+            // EQ row's volume.
+            var missingDays = byDate.Values
+                .Where(d => d.Date >= options.Floor && ValidationRules.ReferenceTraded(d)
+                            && !ourDates.Contains(d.Date))
+                .ToList();
 
-            if (missing > 0 && tag != "split_factor")
-                foreach (var d in referenceDays.Where(d => d.Date >= options.Floor
-                                                        && ValidationRules.ReferenceTraded(d)
-                                                        && !ourDates.Contains(d.Date)))
+            if (missingDays.Count > 0 && tag != "split_factor")
+                foreach (var d in missingDays)
                 {
                     var a = new Anomaly("missing_day", isin, d.Date, null, d.Volume, "no bar of ours");
                     if (known.Contains(a)) baselineCount++; else anomalies.Add(a);
                 }
 
-            coverage.Add(new CoverageRow(isin, "both", common.Count, missing, tag));
+            coverage.Add(new CoverageRow(isin, "both", common.Count, missingDays.Count, tag));
         }
 
         return new ValidationResult(coverage, anomalies, baselineCount, extraDayCount, refUnmapped);
