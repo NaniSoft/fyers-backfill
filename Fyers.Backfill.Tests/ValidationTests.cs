@@ -350,3 +350,168 @@ public sealed class ValidationRulesTests
             anomalies.Select(a => a.Kind).ToArray());
     }
 }
+
+public sealed class ValidationEngineTests
+{
+    private static readonly DateOnly Day = new(2026, 9, 28);
+
+    private static DailyBar Bar(DateOnly date, double c, long v = 1_000) =>
+        new(date, c, c + 1, c - 1, c, v, 375, "09:15", "15:29");
+
+    private static Eod2Reference RefWith(
+        Dictionary<string, string> stemToIsin,
+        Dictionary<string, List<ReferenceDay>> days)
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "fb-ve-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(Path.Combine(dir, "daily"));
+        File.WriteAllLines(Path.Combine(dir, "isin.csv"),
+            ["ISIN,SYMBOL,SERIES",
+             .. stemToIsin.Select(kv => $"{kv.Value},{kv.Key.ToUpperInvariant()},EQ")]);
+        foreach (var (stem, list) in days)
+            File.WriteAllLines(Path.Combine(dir, "daily", stem + ".csv"),
+                ["Date,Open,High,Low,Close,Volume,Series",
+                 .. list.Select(d => $"{d.Date:yyyy-MM-dd},{d.Open},{d.High},{d.Low},{d.Close},{d.Volume},{d.Series}")]);
+        return new Eod2Reference(dir);
+    }
+
+    [Fact]
+    public void Common_day_that_matches_produces_no_anomaly()
+    {
+        var reference = RefWith(
+            new() { ["sbin"] = "INE1" },
+            new() { ["sbin"] = [new ReferenceDay(Day, 100, 101, 99, 100.5, 1_000, "EQ")] });
+        var ours = new Dictionary<string, List<DailyBar>>
+        {
+            ["INE1"] = [new DailyBar(Day, 100, 101, 99, 100.5, 1_000, 375, "09:15", "15:29")],
+        };
+
+        var result = ValidationEngine.Validate(ours, reference, new KnownIssues(),
+            new ValidationOptions(new DateOnly(2017, 7, 3)));
+
+        Assert.Empty(result.NewAnomalies);
+        Assert.Equal("both", Assert.Single(result.Coverage).Bucket);
+    }
+
+    [Fact]
+    public void Reference_day_with_volume_we_lack_is_a_missing_day()
+    {
+        var day2 = new DateOnly(2026, 9, 29);
+        var reference = RefWith(
+            new() { ["sbin"] = "INE1" },
+            new() { ["sbin"] =
+            [
+                new ReferenceDay(Day, 100, 101, 99, 100, 1_000, "EQ"),
+                new ReferenceDay(day2, 100, 101, 99, 100, 5_000, "EQ"),
+            ] });
+        var ours = new Dictionary<string, List<DailyBar>> { ["INE1"] = [Bar(Day, 100)] };
+
+        var result = ValidationEngine.Validate(ours, reference, new KnownIssues(),
+            new ValidationOptions(new DateOnly(2017, 7, 3)));
+
+        var missing = Assert.Single(result.NewAnomalies);
+        Assert.Equal("missing_day", missing.Kind);
+        Assert.Equal(day2, missing.Date);
+    }
+
+    [Fact]
+    public void Reference_day_before_floor_or_untraded_is_not_missing()
+    {
+        var floorDay = new DateOnly(2017, 7, 1);            // before floor
+        var zeroVol = new DateOnly(2026, 9, 29);            // no trade
+        var reference = RefWith(
+            new() { ["sbin"] = "INE1" },
+            new() { ["sbin"] =
+            [
+                new ReferenceDay(floorDay, 100, 101, 99, 100, 9_999, "EQ"),
+                new ReferenceDay(zeroVol, 100, 101, 99, 100, 0, "EQ"),
+            ] });
+        var ours = new Dictionary<string, List<DailyBar>> { ["INE1"] = [] };
+
+        var result = ValidationEngine.Validate(ours, reference, new KnownIssues(),
+            new ValidationOptions(new DateOnly(2017, 7, 3)));
+
+        Assert.Empty(result.NewAnomalies);
+    }
+
+    [Fact]
+    public void Isin_only_in_reference_is_a_missing_isin()
+    {
+        var reference = RefWith(
+            new() { ["tcs"] = "INE1", ["sbin"] = "INE2" },
+            new() { ["tcs"] = [new ReferenceDay(Day, 1, 2, 0.5, 1.5, 500, "EQ")],
+                    ["sbin"] = [new ReferenceDay(Day, 1, 2, 0.5, 1.5, 500, "EQ")] });
+        var ours = new Dictionary<string, List<DailyBar>> { ["INE2"] = [Bar(Day, 1)] };
+
+        var result = ValidationEngine.Validate(ours, reference, new KnownIssues(),
+            new ValidationOptions(new DateOnly(2017, 7, 3)));
+
+        // Brief's literal text compared .Isin against "missing_isin" (the Kind);
+        // the ISIN only in the reference here is INE1.
+        Assert.Equal("INE1",
+            Assert.Single(result.NewAnomalies, a => a.Kind == "missing_isin").Isin);
+        Assert.Equal("eod2_only", result.Coverage.Single(c => c.Isin == "INE1").Bucket);
+        Assert.Equal("both", result.Coverage.Single(c => c.Isin == "INE2").Bucket);
+    }
+
+    [Fact]
+    public void Baselined_anomalies_are_subtracted_and_counted()
+    {
+        var reference = RefWith(
+            new() { ["sbin"] = "INE1" },
+            new() { ["sbin"] = [new ReferenceDay(Day, 100, 101, 99, 100, 5_000, "EQ")] });
+        var ours = new Dictionary<string, List<DailyBar>>
+        {
+            ["INE1"] = [new DailyBar(Day, 100, 101, 99, 100, 900, 375, "09:15", "15:29")],  // −10% volume
+        };
+        var known = new KnownIssues();
+        known.Accept([new Anomaly("volume", "INE1", Day, 900, 5_000, "")]);
+
+        var result = ValidationEngine.Validate(ours, reference, known,
+            new ValidationOptions(new DateOnly(2017, 7, 3)));
+
+        Assert.Empty(result.NewAnomalies);
+        Assert.Equal(1, result.BaselineCount);
+    }
+
+    [Fact]
+    public void Constant_price_ratio_beyond_the_band_is_tagged_split_factor()
+    {
+        // 35 common days at exactly half price → median ratio 0.5 → split_factor,
+        // and its OHLC differences must NOT appear as anomalies.
+        var days = Enumerable.Range(0, 35)
+            .Select(i => new DateOnly(2026, 8, 1).AddDays(i))
+            .ToList();
+        var reference = RefWith(
+            new() { ["sbin"] = "INE1" },
+            new() { ["sbin"] = days.Select(d => new ReferenceDay(d, 200, 202, 198, 200, 1_000, "EQ")).ToList() });
+        var ours = new Dictionary<string, List<DailyBar>>
+        {
+            ["INE1"] = days.Select(d => new DailyBar(d, 100, 101, 99, 100, 1_000, 375, "09:15", "15:29")).ToList(),
+        };
+
+        var result = ValidationEngine.Validate(ours, reference, new KnownIssues(),
+            new ValidationOptions(new DateOnly(2017, 7, 3)));
+
+        Assert.Equal("split_factor", Assert.Single(result.Coverage).Tag);
+        Assert.Empty(result.NewAnomalies);
+    }
+
+    [Fact]
+    public void Ours_day_absent_in_reference_is_an_extra_day()
+    {
+        var day2 = new DateOnly(2026, 9, 29);
+        var reference = RefWith(
+            new() { ["sbin"] = "INE1" },
+            new() { ["sbin"] = [new ReferenceDay(Day, 100, 101, 99, 100, 1_000, "EQ")] });
+        var ours = new Dictionary<string, List<DailyBar>>
+        {
+            ["INE1"] = [Bar(Day, 100), Bar(day2, 100)],   // day2 only on our side
+        };
+
+        var result = ValidationEngine.Validate(ours, reference, new KnownIssues(),
+            new ValidationOptions(new DateOnly(2017, 7, 3)));
+
+        Assert.Empty(result.NewAnomalies);                 // informational only
+        Assert.Equal(1, result.ExtraDayCount);
+    }
+}
