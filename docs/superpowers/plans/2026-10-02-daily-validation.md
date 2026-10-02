@@ -144,7 +144,7 @@ public sealed class DailyAggregatorTests
         var day = Assert.Single(bars);
         Assert.Equal(100, day.Open);        // earliest minute's open
         Assert.Equal(91, day.Close);        // latest minute's close — the last-minute rule
-        Assert.Equal(112, day.High);
+        Assert.Equal(101, day.High);        // the duplicate row's 112 must NOT count
         Assert.Equal(89, day.Low);
         Assert.Equal(15, day.Volume);
         Assert.Equal(2, day.Bars);
