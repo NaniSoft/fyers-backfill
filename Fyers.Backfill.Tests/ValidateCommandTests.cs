@@ -155,6 +155,38 @@ public sealed class ValidateCommandTests
     }
 }
 
+/// <summary>Program-wiring checks for the `validate` / `daily` command surface.
+/// <see cref="Cli"/> lives in the global namespace (declared after Program.cs's
+/// top-level statements) and is visible here via InternalsVisibleTo.</summary>
+public sealed class CliTests
+{
+    [Fact]
+    public void Parses_validate_flags()
+    {
+        var cli = Cli.Parse(["validate", "--dataset", "data", "--eod2", "eod2_data", "--accept-baseline"]);
+        Assert.Equal("validate", cli.Command);
+        Assert.Equal("data", cli.Dataset);
+        Assert.Equal("eod2_data", cli.Eod2);
+        Assert.True(cli.AcceptBaseline);
+    }
+
+    [Fact]
+    public void Flags_default_when_omitted()
+    {
+        var cli = Cli.Parse(["validate"]);
+        Assert.Equal("validate", cli.Command);
+        Assert.Null(cli.Dataset);
+        Assert.Null(cli.Eod2);
+        Assert.False(cli.AcceptBaseline);
+    }
+
+    [Fact]
+    public void Daily_is_recognised()
+    {
+        Assert.Equal("daily", Cli.Parse(["daily"]).Command);
+    }
+}
+
 public sealed class OrganizerTests
 {
     private static string TempDir(string tag)

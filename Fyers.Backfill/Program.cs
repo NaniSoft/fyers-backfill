@@ -4,6 +4,7 @@ using Fyers.Backfill.Failures;
 using Fyers.Backfill.Instruments;
 using Fyers.Backfill.Ledger;
 using Fyers.Backfill.Parquet;
+using Fyers.Backfill.Validation;
 using Fyers.Core;
 using Fyers.Core.Config;
 using Fyers.Core.Fyers;
@@ -22,6 +23,8 @@ using Microsoft.Extensions.Logging;
 //   fyers-backfill backfill              # full sweep (resumable)
 //   fyers-backfill update                # newest window per instrument (daily)
 //   fyers-backfill status                # Ledger + dataset summary
+//   fyers-backfill validate              # compare data/ against eod2_data/ (offline)
+//   fyers-backfill daily                 # login-check → update → organize → validate
 //
 // Dataset: <root>/<resolution>/<SYMBOL>.parquet (Zstd), where <root> is the
 // mounted file share (default data/backfill, container default /data).
@@ -77,6 +80,16 @@ if (cli.Command == "status")
 if (cli.Command == "compact")
     return await CompactAsync(cfg, log);
 
+// `validate` is offline: it never touches Fyers, so it must run without a token.
+if (cli.Command == "validate")
+{
+    var dataset = Path.Combine(repoRoot, cli.Dataset ?? "data");
+    var validationDir = Path.Combine(dataset, "_validation");
+    var floor = cli.From ?? cfg.From;
+    return await new ValidateCommand(dataset, Path.Combine(repoRoot, cli.Eod2 ?? "eod2_data"),
+        validationDir, floor, cli.AcceptBaseline).RunAsync(CancellationToken.None);
+}
+
 // Everything below needs a live token.
 var tokenFile = new TokenFile(tokenPath);
 var token = tokenFile.AccessToken();
@@ -120,6 +133,27 @@ if (cfg.MarketHoursOnly && IsMarketHours(DateTime.UtcNow))
 {
     log.LogWarning("backfill: inside NSE market hours and market_hours_only=true — not starting");
     return 0;
+}
+
+// `daily` is the whole chain: update → organize → validate. Token freshness is
+// already proven above (tokenFile.AccessToken() != null), and the market-hours
+// guard above deliberately covers its update step too.
+if (cli.Command == "daily")
+{
+    var update = await runner.RunAsync(RunMode.Update, 0, CancellationToken.None);
+    if (update.AuthExpired) return 2;
+
+    var dataset = Path.Combine(repoRoot, cli.Dataset ?? "data");
+    var eod2 = Path.Combine(repoRoot, cli.Eod2 ?? "eod2_data");
+    var organized = await new Organizer(
+        Path.Combine(cfg.Root, "1min"), dataset,
+        Path.Combine(eod2, "isin_symbol_map.json"),
+        Path.Combine(dataset, "_manifest.csv")).RunAsync(CancellationToken.None);
+    log.LogInformation("daily: organized {Mapped} files, {Left} left unmapped",
+        organized.MappedFiles, organized.LeftInPlace.Count);
+
+    return await new ValidateCommand(dataset, eod2, Path.Combine(dataset, "_validation"),
+        cli.From ?? cfg.From, cli.AcceptBaseline).RunAsync(CancellationToken.None);
 }
 
 var mode = cli.Command switch
@@ -294,7 +328,10 @@ internal sealed record Cli(
     string? Root,
     DateOnly? From,
     DateOnly? To,
-    int PilotCount)
+    int PilotCount,
+    string? Dataset = null,
+    string? Eod2 = null,
+    bool AcceptBaseline = false)
 {
     public const string Usage = """
         fyers-backfill — local NSE historical 1-minute OHLCV backfill (Fyers v3)
@@ -307,6 +344,9 @@ internal sealed record Cli(
           update                Newest window per instrument (daily increment)
           status                Ledger + dataset summary
           compact               Fold _parts/* part files into the per-symbol file
+          validate [--accept-baseline]
+                                Compare data/ against eod2_data/ (offline)
+          daily                 login-check → update → organize → validate
 
         Options:
           --config PATH         config.yaml (default <repo>/config.yaml)
@@ -317,13 +357,18 @@ internal sealed record Cli(
           --from YYYY-MM-DD     override the start date (e.g. 2026-09-01)
           --to YYYY-MM-DD       override the end date (e.g. 2026-09-24)
           --pilot N             instrument count for the pilot command
+          --dataset PATH        ISIN dataset (default <repo>/data)
+          --eod2 PATH           eod2 reference dir (default <repo>/eod2_data)
+          --accept-baseline     write current anomalies to known_issues.csv (first run)
         """;
 
     public static Cli Parse(string[] args)
     {
         string? command = null, config = null, env = null, dataDir = null, repoRoot = null, root = null;
+        string? dataset = null, eod2 = null;
         DateOnly? from = null, to = null;
         var pilot = 5;
+        var acceptBaseline = false;
 
         for (var i = 0; i < args.Length; i++)
         {
@@ -346,6 +391,9 @@ internal sealed record Cli(
                 case "--pilot":
                     pilot = int.Parse(Value(), System.Globalization.CultureInfo.InvariantCulture);
                     break;
+                case "--dataset": dataset = Value(); break;
+                case "--eod2": eod2 = Value(); break;
+                case "--accept-baseline": acceptBaseline = true; break;
                 default:
                     if (args[i].StartsWith('-'))
                         throw new ArgumentException($"unrecognised option '{args[i]}'");
@@ -354,7 +402,8 @@ internal sealed record Cli(
             }
         }
 
-        return new Cli(command, config, env, dataDir, repoRoot, root, from, to, pilot);
+        return new Cli(command, config, env, dataDir, repoRoot, root, from, to, pilot,
+            dataset, eod2, acceptBaseline);
     }
 
     private static DateOnly ParseDate(string raw, string flag)
