@@ -99,22 +99,23 @@ public sealed class DailyAggregatorTests
     }
 
     [Fact]
-    public void Merges_file_level_bars_into_one_day()
+    public void Co_traded_dates_take_the_eq_files_bar()
     {
         var day = new DateOnly(2026, 9, 28);
         var merged = DailyAggregator.MergeFiles(new[]
         {
             new[] { new DailyBar(day, 100, 101, 99, 100.5, 1_000, 375, "09:15", "15:29") },
-            new[] { new DailyBar(day, 100.6, 102, 100, 101.0, 500, 60, "10:00", "15:00") },
+            new[] { new DailyBar(day, 100.6, 102, 100, 101.0, 500, 60, "09:15", "15:29") },
+            new[] { new DailyBar(day.AddDays(1), 200, 201, 199, 200.5, 2_000, 300, "09:15", "15:29") },
         });
 
-        var m = Assert.Single(merged);
-        Assert.Equal(100, m.Open);      // earliest first-minute
-        Assert.Equal(101, m.Close);     // latest last-minute
-        Assert.Equal(102, m.High);
-        Assert.Equal(99, m.Low);
-        Assert.Equal(1_500, m.Volume);
-        Assert.Equal(435, m.Bars);
+        Assert.Equal(2, merged.Count);
+        Assert.Equal(100, merged[0].Open);       // the EQ file's bar wins the co-traded date
+        Assert.Equal(100.5, merged[0].Close);
+        Assert.Equal(1_000, merged[0].Volume);   // NOT the sum — the BE row duplicates the same session
+        Assert.Equal(375, merged[0].Bars);
+        Assert.Equal(200.5, merged[1].Close);    // a date only the BE file carries passes through
+        Assert.Equal(2_000, merged[1].Volume);
     }
 }
 

@@ -29,7 +29,7 @@ public sealed class ValidateCommandTests
     }
 
     [Fact]
-    public async void End_to_end_on_a_miniature_dataset()
+    public async Task End_to_end_on_a_miniature_dataset()
     {
         var dataset = TempDir("ds");
         var eod2 = TempDir("eod");
@@ -65,7 +65,7 @@ public sealed class ValidateCommandTests
     }
 
     [Fact]
-    public async void Second_run_uses_the_cache_and_stays_stable()
+    public async Task Second_run_uses_the_cache_and_stays_stable()
     {
         var dataset = TempDir("ds");
         var eod2 = TempDir("eod");
@@ -93,7 +93,7 @@ public sealed class ValidateCommandTests
     }
 
     [Fact]
-    public async void Two_ticker_files_merge_into_one_isin_day()
+    public async Task Two_ticker_files_merge_into_one_isin_day()
     {
         var dataset = TempDir("ds");
         var eod2 = TempDir("eod");
@@ -110,18 +110,22 @@ public sealed class ValidateCommandTests
                 ["ISIN,SYMBOL,SERIES", "INE0000000001,X,EQ"]);
             File.WriteAllLines(Path.Combine(eod2, "daily", "x.csv"),
                 ["Date,Open,High,Low,Close,Volume,Series",
-                 "2026-09-28,100,102,99,101,1500,EQ"]);
+                 "2026-09-28,100,101,99,100.5,1000,EQ"]);
 
             var command = new ValidateCommand(dataset, eod2, validation,
                 new DateOnly(2017, 7, 3), acceptBaseline: false);
 
-            Assert.Equal(0, await command.RunAsync(CancellationToken.None));  // merged day matches
+            Assert.Equal(0, await command.RunAsync(CancellationToken.None));  // the EQ bar wins the co-traded day
+
+            var state = File.ReadAllText(Path.Combine(validation, "state.json"));
+            Assert.Contains("INE0000000001::NSE_X-EQ.parquet", state);
+            Assert.Contains("INE0000000001::NSE_X-BE.parquet", state);
         }
         finally { Directory.Delete(dataset, true); Directory.Delete(eod2, true); Directory.Delete(validation, true); }
     }
 
     [Fact]
-    public async void Second_file_added_later_is_picked_up_without_losing_the_first()
+    public async Task Second_file_added_later_is_picked_up_without_losing_the_first()
     {
         var dataset = TempDir("ds");
         var eod2 = TempDir("eod");
@@ -136,14 +140,15 @@ public sealed class ValidateCommandTests
                 ["ISIN,SYMBOL,SERIES", "INE0000000001,X,EQ"]);
             File.WriteAllLines(Path.Combine(eod2, "daily", "x.csv"),
                 ["Date,Open,High,Low,Close,Volume,Series",
-                 "2026-09-28,100,102,99,101,1500,EQ"]);
+                 "2026-09-28,100,101,99,100.5,1000,EQ",
+                 "2026-09-29,100.6,102,100,101,500,BE"]);
 
             var command = new ValidateCommand(dataset, eod2, validation,
                 new DateOnly(2017, 7, 3), acceptBaseline: false);
             Assert.Equal(1, await command.RunAsync(CancellationToken.None));  // BE volume missing → missing_day
 
             await WriteMinuteFile(Path.Combine(isinDir, "NSE_X-BE.parquet"),
-                [(1790589540, 100.6, 102, 100, 101.0, 500)]);     // arrives later
+                [(1790653500, 100.6, 102, 100, 101.0, 500)]);     // 2026-09-29, arrives later
             Assert.Equal(0, await command.RunAsync(CancellationToken.None));  // now complete
         }
         finally { Directory.Delete(dataset, true); Directory.Delete(eod2, true); Directory.Delete(validation, true); }

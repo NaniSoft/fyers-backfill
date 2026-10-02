@@ -64,7 +64,7 @@ public sealed class ValidateCommand(
     /// <summary>Every cash parquet: <c>&lt;dataset&gt;/&lt;ISIN&gt;/cash/*.parquet</code>,
     /// ISIN taken from the directory name (self-healing — no stale manifest). Files
     /// of one ISIN are grouped together and ordered EQ first, then by name, so the
-    /// per-file merge is deterministic and never depends on directory order.</summary>
+    /// merge is deterministic and never depends on directory order.</summary>
     public static IReadOnlyList<IsinSource> DiscoverCashSources(string datasetDir)
     {
         if (!Directory.Exists(datasetDir)) return [];
@@ -79,14 +79,15 @@ public sealed class ValidateCommand(
                 sources.Add(IsinSource.Of(isin, f));
         }
         return sources.OrderBy(s => s.Isin, StringComparer.Ordinal)
-            .ThenBy(SeriesKey, StringComparer.Ordinal)                 // EQ first: anchors a merged day
+            .ThenBy(SeriesKey, StringComparer.Ordinal)                 // EQ first: wins a co-traded date
             .ThenBy(s => s.Path, StringComparer.Ordinal)
             .ToList();
     }
 
-    /// <summary>Sort key ordering an ISIN's files EQ first (the primary session,
-    /// which anchors a merged day's open), every other series after it by name:
-    /// "" sorts before any series name, so EQ maps to "".</summary>
+    /// <summary>Sort key ordering an ISIN's files EQ first — the EQ bar is the one
+    /// <see cref="DailyAggregator.MergeFiles"/> keeps for a co-traded date, just as
+    /// the reference side dedupes duplicate dates EQ-first — and every other series
+    /// after it by name: "" sorts before any series name, so EQ maps to "".</summary>
     private static string SeriesKey(IsinSource s)
     {
         var stem = Path.GetFileNameWithoutExtension(s.Path);
