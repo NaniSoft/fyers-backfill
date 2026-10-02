@@ -303,8 +303,13 @@ public sealed class AggregationCacheTests
         var dir = TempDir();
         try
         {
+            // Fingerprint a FILE, not the directory itself: WriteIsin creates
+            // cache/ + state.json inside dir, which bumps a directory's mtime
+            // and would flake the IsCurrent assert (~1 in 3 on NTFS).
+            var watch = Path.Combine(dir, "watch.txt");
+            File.WriteAllText(watch, "x");
             var cache = new AggregationCache(dir);
-            var src = Source(dir);
+            var src = IsinSource.Of("INE000TEST000", watch);
             cache.WriteIsin("INE000TEST000", Bars(), src);
 
             Assert.Equal(Bars(), cache.ReadIsin("INE000TEST000"));
