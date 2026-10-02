@@ -1085,10 +1085,32 @@ public sealed class ValidationEngineTests
         var result = ValidationEngine.Validate(ours, reference, new KnownIssues(),
             new ValidationOptions(new DateOnly(2017, 7, 3)));
 
-        Assert.Equal("missing_isin",
+        Assert.Equal("INE1",
             Assert.Single(result.NewAnomalies, a => a.Kind == "missing_isin").Isin);
         Assert.Equal("eod2_only", result.Coverage.Single(c => c.Isin == "INE1").Bucket);
         Assert.Equal("both", result.Coverage.Single(c => c.Isin == "INE2").Bucket);
+    }
+
+    [Fact]
+    public void Duplicate_reference_dates_keep_the_eq_row()
+    {
+        // A stem can carry both an EQ and a BE row for the same date; EQ wins.
+        var reference = RefWith(
+            new() { ["sbin"] = "INE1" },
+            new() { ["sbin"] =
+            [
+                new ReferenceDay(Day, 100, 101, 99, 100, 1_000, "BE"),
+                new ReferenceDay(Day, 200, 201, 199, 200, 2_000, "EQ"),
+            ] });
+        var ours = new Dictionary<string, List<DailyBar>>
+        {
+            ["INE1"] = [new DailyBar(Day, 200, 201, 199, 200, 2_000, 375, "09:15", "15:29")],
+        };
+
+        var result = ValidationEngine.Validate(ours, reference, new KnownIssues(),
+            new ValidationOptions(new DateOnly(2017, 7, 3)));
+
+        Assert.Empty(result.NewAnomalies);   // matches the EQ row, not the BE row
     }
 
     [Fact]
@@ -1192,8 +1214,11 @@ public static class ValidationEngine
         KnownIssues known,
         ValidationOptions options)
     {
-        // stem → our ISIN, for the four coverage buckets.
+        // stem → our ISIN. Full day lists are retained only for ISINs we carry
+        // (the comparable set); everyone else keeps a traded-day count so the
+        // ~449 MB reference is never fully materialised.
         var refByIsin = new Dictionary<string, List<ReferenceDay>>();
+        var refTraded = new Dictionary<string, int>();
         var refUnmapped = new List<string>();
         foreach (var stem in reference.Stems)
         {
@@ -1202,9 +1227,20 @@ public static class ValidationEngine
                 refUnmapped.Add(stem);              // ref_unmapped — report-only
                 continue;
             }
-            if (!refByIsin.TryGetValue(isin, out var list))
-                refByIsin[isin] = list = [];
-            list.AddRange(reference.Days(stem));
+            var carried = oursByIsin.ContainsKey(isin);
+            if (carried)
+            {
+                if (!refByIsin.TryGetValue(isin, out var list))
+                    refByIsin[isin] = list = [];
+                list.AddRange(reference.Days(stem));
+            }
+            else
+            {
+                var traded = reference.Days(stem).Count(d =>
+                    d.Date >= options.Floor && ValidationRules.ReferenceTraded(d));
+                if (traded > 0)
+                    refTraded[isin] = refTraded.TryGetValue(isin, out var n) ? n + traded : traded;
+            }
         }
 
         var coverage = new List<CoverageRow>();
@@ -1212,19 +1248,27 @@ public static class ValidationEngine
         var baselineCount = 0;
         var extraDayCount = 0;
 
-        foreach (var isin in oursByIsin.Keys.Concat(refByIsin.Keys).Distinct().OrderBy(x => x, StringComparer.Ordinal))
+        foreach (var isin in oursByIsin.Keys.Concat(refByIsin.Keys).Concat(refTraded.Keys)
+                     .Distinct().OrderBy(x => x, StringComparer.Ordinal))
         {
             var ours = oursByIsin.TryGetValue(isin, out var o) ? o : [];
             var referenceDays = refByIsin.TryGetValue(isin, out var r) ? r : [];
-            var byDate = referenceDays.ToDictionary(d => d.Date);
 
-            if (ours.Count == 0 && referenceDays.Count > 0)
+            // EQ wins when a stem carries several series rows for one date
+            // (EQ and BE both traded that day); a plain ToDictionary would throw.
+            var byDate = new Dictionary<DateOnly, ReferenceDay>();
+            foreach (var d in referenceDays)
+                if (d.Series == "EQ" || !byDate.ContainsKey(d.Date))
+                    byDate[d.Date] = d;
+
+            if (ours.Count == 0 && (referenceDays.Count > 0 || refTraded.TryGetValue(isin, out var tradedOnly)))
             {
-                var traded = referenceDays.Where(d => d.Date >= options.Floor && ValidationRules.ReferenceTraded(d)).ToList();
-                coverage.Add(new CoverageRow(isin, "eod2_only", 0, traded.Count, ""));
-                if (traded.Count > 0)
-                    anomalies.Add(new Anomaly("missing_isin", isin, null, null, traded.Count,
-                        FormattableString.Invariant($"{traded.Count} traded reference days since floor")));
+                var traded = referenceDays.Count(d => d.Date >= options.Floor && ValidationRules.ReferenceTraded(d));
+                if (traded == 0) traded = tradedOnly;
+                coverage.Add(new CoverageRow(isin, "eod2_only", 0, traded, ""));
+                if (traded > 0)
+                    anomalies.Add(new Anomaly("missing_isin", isin, null, null, traded,
+                        FormattableString.Invariant($"{traded} traded reference days since floor")));
                 continue;
             }
             if (ours.Count > 0 && referenceDays.Count == 0)
@@ -1240,7 +1284,7 @@ public static class ValidationEngine
                       && (ratio < options.SplitFactorLow || ratio > options.SplitFactorHigh)
                 ? "split_factor" : "";
 
-            var missing = 0;
+            var ourDates = ours.Select(b => b.Date).ToHashSet();
             foreach (var bar in ours)
             {
                 if (!byDate.TryGetValue(bar.Date, out var refDay))
@@ -1255,20 +1299,18 @@ public static class ValidationEngine
                     else anomalies.Add(a);
                 }
             }
-            missing = referenceDays.Count(d => d.Date >= options.Floor
-                                            && ValidationRules.ReferenceTraded(d)
-                                            && !ours.Any(b => b.Date == d.Date));
 
-            if (missing > 0 && tag != "split_factor")
-                foreach (var d in referenceDays.Where(d => d.Date >= options.Floor
-                                                        && ValidationRules.ReferenceTraded(d)
-                                                        && !ours.Any(b => b.Date == d.Date)))
+            var missingDays = referenceDays.Where(d => d.Date >= options.Floor
+                                                    && ValidationRules.ReferenceTraded(d)
+                                                    && !ourDates.Contains(d.Date)).ToList();
+            if (missingDays.Count > 0 && tag != "split_factor")
+                foreach (var d in missingDays)
                 {
                     var a = new Anomaly("missing_day", isin, d.Date, null, d.Volume, "no bar of ours");
                     if (known.Contains(a)) baselineCount++; else anomalies.Add(a);
                 }
 
-            coverage.Add(new CoverageRow(isin, "both", common.Count, missing, tag));
+            coverage.Add(new CoverageRow(isin, "both", common.Count, missingDays.Count, tag));
         }
 
         return new ValidationResult(coverage, anomalies, baselineCount, extraDayCount, refUnmapped);
