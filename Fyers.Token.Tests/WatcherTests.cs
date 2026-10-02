@@ -1,4 +1,5 @@
 using Fyers.Token;
+using Microsoft.Extensions.Logging;
 
 namespace Fyers.Token.Tests;
 
@@ -6,7 +7,7 @@ namespace Fyers.Token.Tests;
 /// sockets, no Fyers, no Telegram (same seams the Python tests use).</summary>
 public class WatcherTests
 {
-    private static TokenConfig Cfg(string dataDir) => new()
+    private static TokenConfig Cfg(string dataDir, string? botToken = null, string? chatId = null) => new()
     {
         AppId = TestEnv.AppId,
         SecretId = TestEnv.SecretId,
@@ -15,6 +16,8 @@ public class WatcherTests
         PromptTime = "06:30",
         RemindIntervalMin = 60,
         WatchIntervalSec = 60,
+        TelegramBotToken = botToken ?? "",
+        TelegramChatId = chatId ?? "",
     };
 
     /// <summary>Epoch seconds for 2026-09-14 20:00 IST (yesterday vs the tests' today).</summary>
@@ -148,14 +151,41 @@ public class WatcherTests
         var root = Directory.CreateTempSubdirectory("fyers-watch-").FullName;
         try
         {
+            // Telegram CONFIGURED but failing: keep retrying, keep rotating.
             var notifier = new RecordingNotifier { FailNext = true };
             var now = TestEnv.Ist(7, 0);
-            var svc = new TokenService(Cfg(root), notifier: notifier, now: () => now);
+            var svc = new TokenService(Cfg(root, "t", "c"), notifier: notifier, now: () => now);
 
             Assert.False(await svc.WatchOnceAsync());   // Telegram down -> not "sent"
             notifier.FailNext = false;
             now = TestEnv.Ist(7, 1);
             Assert.True(await svc.WatchOnceAsync());   // so it tries again right away
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [Fact]
+    public async Task No_telegram_delivers_via_the_console_and_holds_the_state()
+    {
+        var root = Directory.CreateTempSubdirectory("fyers-watch-").FullName;
+        try
+        {
+            // No Telegram configured at all: the console log IS the delivery
+            // channel. The URL must be printed once and its state held stable —
+            // a 60s tick that rotates the state kills the printed link.
+            var logger = new RecordingLogger();
+            var now = TestEnv.Ist(6, 30);
+            var svc = new TokenService(Cfg(root), log: logger, now: () => now);
+
+            Assert.True(await svc.WatchOnceAsync());   // a prompt WAS delivered
+            var urlLine = Assert.Single(logger.Infos, m => m.Contains("/generate-authcode?"));
+            Assert.Contains("client_id=TESTAPPID", urlLine);
+            var stateOne = svc.PendingState;
+            Assert.NotNull(stateOne);
+
+            now = TestEnv.Ist(6, 32);
+            Assert.False(await svc.WatchOnceAsync());  // waiting on the user — no spam
+            Assert.Equal(stateOne, svc.PendingState);  // the printed link still works
         }
         finally { Directory.Delete(root, true); }
     }
@@ -184,5 +214,22 @@ public class WatcherTests
             Assert.Single(notifier.Sent);
         }
         finally { Directory.Delete(root, true); }
+    }
+}
+
+/// <summary>Captures Information-level log lines — the console delivery channel
+/// for the login URL when Telegram is not configured.</summary>
+public sealed class RecordingLogger : ILogger
+{
+    public List<string> Infos { get; } = [];
+
+    public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+    public bool IsEnabled(LogLevel logLevel) => true;
+
+    public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+        Func<TState, Exception?, string> formatter)
+    {
+        if (logLevel == LogLevel.Information)
+            Infos.Add(formatter(state, exception));
     }
 }
