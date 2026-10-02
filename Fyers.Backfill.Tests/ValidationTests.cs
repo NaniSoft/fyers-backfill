@@ -242,6 +242,48 @@ public sealed class Eod2ReferenceTests
     }
 }
 
+public sealed class KnownIssuesTests
+{
+    private static Anomaly MissingDay(string isin, string date) => new(
+        "missing_day", isin, DateOnly.Parse(date), null, null, "");
+
+    [Fact]
+    public void Missing_file_loads_empty()
+    {
+        Assert.Equal(0, KnownIssues.Load(Path.Combine(Path.GetTempPath(),
+            Guid.NewGuid().ToString("N")).Replace('-', 'a')).Count);
+    }
+
+    [Fact]
+    public void Accept_then_contains_roundtrips_through_save_and_load()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "fb-ki-" + Guid.NewGuid().ToString("N")[..8] + ".csv");
+        try
+        {
+            var issues = new KnownIssues();
+            issues.Accept([MissingDay("INE1", "2020-01-27"),
+                           new Anomaly("split_factor", "INE2", null, 9.97, 1.0, "ratio")]);
+            issues.Save(path);
+
+            var reloaded = KnownIssues.Load(path);
+            Assert.Equal(2, reloaded.Count);
+            Assert.True(reloaded.Contains(MissingDay("INE1", "2020-01-27")));
+            Assert.True(reloaded.Contains(new Anomaly("split_factor", "INE2", null, 0, 0, "")));
+            Assert.False(reloaded.Contains(MissingDay("INE1", "2020-01-28")));
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void Accept_deduplicates()
+    {
+        var issues = new KnownIssues();
+        issues.Accept([MissingDay("INE1", "2020-01-27")]);
+        issues.Accept([MissingDay("INE1", "2020-01-27")]);
+        Assert.Equal(1, issues.Count);
+    }
+}
+
 public sealed class ValidationRulesTests
 {
     private static readonly DateOnly Day = new(2026, 9, 28);
