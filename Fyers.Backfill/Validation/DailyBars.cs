@@ -8,8 +8,10 @@ public sealed record DailyBar(
     long Volume, int Bars, string FirstMinute, string LastMinute);
 
 /// <summary>Minute → daily aggregation. Day boundary is IST (+19800s), matching
-/// tools/build_our_eod.py; duplicate minutes collapse keeping the FIRST (same
-/// rule as CandleStore's ts_utc merge).</summary>
+/// tools/build_our_eod.py. Duplicate minutes collapse keeping the FIRST row per
+/// <c>ts_utc</c>, so a re-downloaded minute cannot double-count volume or push
+/// the day's high/low around. (CandleStore's own ts_utc merge is LAST-wins, a
+/// different rule — do not rely on parity with it.)</summary>
 public static class DailyAggregator
 {
     public const int IstOffsetSeconds = 19_800;
