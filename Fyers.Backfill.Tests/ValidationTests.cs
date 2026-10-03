@@ -302,6 +302,27 @@ public sealed class KnownIssuesTests
         issues.Accept([MissingDay("INE1", "2020-01-27")]);
         Assert.Equal(1, issues.Count);
     }
+
+    [Fact]
+    public void Close_anomalies_accept_at_isin_level_and_cover_other_dates()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "fb-ki-" + Guid.NewGuid().ToString("N")[..8] + ".csv");
+        try
+        {
+            var issues = new KnownIssues();
+            issues.Accept([new Anomaly("close", "INE1", new DateOnly(2026, 9, 28), 812.3, 812.0, "")]);
+            issues.Save(path);
+
+            var reloaded = KnownIssues.Load(path);
+            Assert.True(reloaded.Contains(new Anomaly("close", "INE1", new DateOnly(2026, 10, 5), 900, 895, "")),
+                "an ISIN-level close accept covers any date");
+            Assert.False(reloaded.Contains(new Anomaly("missing_day", "INE1", new DateOnly(2026, 9, 28), null, null, "")),
+                "other kinds keep per-date keys");
+            Assert.False(reloaded.Contains(new Anomaly("close", "INE2", new DateOnly(2026, 9, 28), 1, 1, "")),
+                "a different ISIN is not covered");
+        }
+        finally { File.Delete(path); }
+    }
 }
 
 public sealed class ValidationRulesTests

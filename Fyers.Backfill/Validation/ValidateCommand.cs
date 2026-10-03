@@ -48,13 +48,22 @@ public sealed class ValidateCommand(
         var result = ValidationEngine.Validate(oursByIsin, reference, known,
             new ValidationOptions(floor));
 
-        if (acceptBaseline && result.NewAnomalies.Count > 0)
+        // An explicit --accept-baseline always rewrites the baseline under the
+        // current scheme — that is what migrates a legacy per-date file to
+        // ISIN-level tolerance rows even when nothing new fired.
+        if (acceptBaseline)
         {
             known.Accept(result.NewAnomalies);
             known.Save(Path.Combine(validationDir, "known_issues.csv"));
+            Console.WriteLine(
+                $"validate: {result.NewAnomalies.Count} new anomalies accepted into the baseline " +
+                $"({known.Count} known rows now)");
             return 0;
         }
 
+        Console.WriteLine(
+            $"validate: {result.NewAnomalies.Count} new anomalies, {result.BaselineCount} baselined diffs, " +
+            $"{result.ExtraDayCount} extra days");
         return ReportWriter.Write(validationDir, TodayIst(), result, reference.LastUpdateUtc);
     }
 
