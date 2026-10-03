@@ -115,10 +115,24 @@ public sealed class AggregationCache(string validationDir)
         File.Move(tmpState, StatePath, overwrite: true);
     }
 
-    private CacheState LoadState() =>
-        File.Exists(StatePath)
-            ? JsonSerializer.Deserialize<CacheState>(File.ReadAllText(StatePath)) ?? new(new())
-            : new(new Dictionary<string, CacheStateEntry>());
+    /// <summary>A corrupt or unreadable state.json must cost a full re-aggregation
+    /// (a few minutes), never the run — so the deserialize degrades to an empty
+    /// state and every file is re-fingerprinted and re-aggregated.</summary>
+    private CacheState LoadState()
+    {
+        if (!File.Exists(StatePath)) return new(new Dictionary<string, CacheStateEntry>());
+        try
+        {
+            return JsonSerializer.Deserialize<CacheState>(File.ReadAllText(StatePath)) ?? new(new());
+        }
+        catch (Exception e) when (e is JsonException or IOException)
+        {
+            // No logger reaches this class; the line is what makes a wiped cache
+            // in the morning log explainable.
+            Console.Error.WriteLine("validate: state.json was corrupt — rebuilding the aggregation cache from scratch");
+            return new(new Dictionary<string, CacheStateEntry>());
+        }
+    }
 
     internal static DailyBar ToBar(DailyBarDto dto) => new(
         new DateOnly((int)(dto.DateYmd / 10_000), (int)(dto.DateYmd / 100 % 100), (int)(dto.DateYmd % 100)),

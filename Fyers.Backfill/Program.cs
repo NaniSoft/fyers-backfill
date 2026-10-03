@@ -140,8 +140,17 @@ if (cfg.MarketHoursOnly && IsMarketHours(DateTime.UtcNow))
 // guard above deliberately covers its update step too.
 if (cli.Command == "daily")
 {
+    if (cli.AcceptBaseline)
+        log.LogWarning(
+            "daily: --accept-baseline is dangerous here — it rewrites the baseline and skips the report; " +
+            "use `validate --accept-baseline` explicitly");
+
     var update = await runner.RunAsync(RunMode.Update, 0, CancellationToken.None);
     if (update.AuthExpired) return 2;
+    if (update.Failed > 0)
+        log.LogWarning(
+            "daily: the update pull failed on {Failed} window(s) — downstream missing-day anomalies " +
+            "today are the pull's fault, not the dataset's", update.Failed);
 
     var dataset = Path.Combine(repoRoot, cli.Dataset ?? "data");
     var eod2 = Path.Combine(repoRoot, cli.Eod2 ?? "eod2_data");

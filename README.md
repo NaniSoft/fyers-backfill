@@ -169,8 +169,15 @@ open/high/low to the tick, close within 0.5% (last-minute close vs official),
 volume within 1%. Missing days count only when the reference shows volume.
 The first run needs `--accept-baseline` to absorb the known permanent gaps;
 after that, `validate` reports only what is new (exit 1 = new anomalies,
-0 = clean, 2 = config/auth). `daily` chains the token check, the `update`
-pull, the organize-into-`data/` pass, and `validate` in one resumable run.
+0 = clean, 2 = config/auth, or an eod2 reference with no daily files / no ISIN
+map — a broken reference never reports green). `daily` chains the token check,
+the `update` pull, the organize-into-`data/` pass, and `validate` in one
+resumable run.
+
+`data/1min/` is a staging buffer, not an archive: `daily` folds each cash file
+into `data/<ISIN>/cash/` and deletes it from staging, so the ISIN dataset cannot
+be rebuilt from what `1min/` holds afterwards. F&O files accumulate in `1min/`
+by design — nothing maps them yet, and validation is cash-only.
 
 ## How it stays within Fyers' limits
 

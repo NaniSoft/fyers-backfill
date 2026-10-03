@@ -29,6 +29,104 @@ public sealed class ValidateCommandTests
     }
 
     [Fact]
+    public async Task Empty_eod2_reference_refuses_to_report_green()
+    {
+        var dataset = TempDir("ds");
+        var eod2 = TempDir("eod");      // exists, but carries no daily/ and no isin.csv
+        var validation = TempDir("val");
+        try
+        {
+            var command = new ValidateCommand(dataset, eod2, validation,
+                new DateOnly(2017, 7, 3), acceptBaseline: false);
+
+            Assert.Equal(2, await command.RunAsync(CancellationToken.None));
+            Assert.Empty(Directory.EnumerateFiles(validation, "*", SearchOption.AllDirectories));
+        }
+        finally { Directory.Delete(dataset, true); Directory.Delete(eod2, true); Directory.Delete(validation, true); }
+    }
+
+    [Fact]
+    public async Task Missing_input_dir_names_what_is_absent_and_exits_2()
+    {
+        var dataset = Path.Combine(TempDir("ds"), "absent");
+        var eod2 = TempDir("eod");
+        var validation = TempDir("val");
+        try
+        {
+            var command = new ValidateCommand(dataset, eod2, validation,
+                new DateOnly(2017, 7, 3), acceptBaseline: false);
+
+            Assert.Equal(2, await command.RunAsync(CancellationToken.None));
+            Assert.Empty(Directory.EnumerateFiles(validation, "*", SearchOption.AllDirectories));
+        }
+        finally { Directory.Delete(eod2, true); Directory.Delete(Path.GetDirectoryName(dataset)!, true); Directory.Delete(validation, true); }
+    }
+
+    [Fact]
+    public async Task Stale_reference_warns_but_still_runs()
+    {
+        var dataset = TempDir("ds");
+        var eod2 = TempDir("eod");
+        var validation = TempDir("val");
+        try
+        {
+            File.WriteAllLines(Path.Combine(eod2, "isin.csv"),
+                ["ISIN,SYMBOL,SERIES", "INE0000000001,X,EQ"]);
+            Directory.CreateDirectory(Path.Combine(eod2, "daily"));   // File.WriteAllLines does not mkdir
+            File.WriteAllLines(Path.Combine(eod2, "daily", "x.csv"),
+                ["Date,Open,High,Low,Close,Volume,Series", "2026-09-28,100,101,99,100.5,1000,EQ"]);
+            File.WriteAllText(Path.Combine(eod2, "meta.json"),
+                $$"""{"lastUpdate": "{{DateTime.UtcNow.AddDays(-30):o}}"}""");
+
+            var command = new ValidateCommand(dataset, eod2, validation,
+                new DateOnly(2017, 7, 3), acceptBaseline: false);
+
+            // Staleness is a warning only — 2 is reserved for a broken reference.
+            Assert.NotEqual(2, await command.RunAsync(CancellationToken.None));
+        }
+        finally { Directory.Delete(dataset, true); Directory.Delete(eod2, true); Directory.Delete(validation, true); }
+    }
+
+    [Fact]
+    public async Task Organized_pull_file_is_folded_into_the_validated_day()
+    {
+        var pull = TempDir("pull");
+        var dataset = TempDir("ds");
+        var eod2 = TempDir("eod");
+        var validation = TempDir("val");
+        var mapDir = TempDir("map");
+        var mapPath = Path.Combine(mapDir, "map.json");
+        try
+        {
+            // 1790653500 = 2026-09-29 09:15 IST — the session the pull carries.
+            await WriteMinuteFile(Path.Combine(pull, "NSE_X-EQ.parquet"),
+                [(1790653500, 100.6, 102, 100, 101.0, 500)]);
+            File.WriteAllText(mapPath, """{"sym2isin": {"X": "INE0000000001"}}""");
+
+            Assert.Equal(1, (await new Organizer(pull, dataset, mapPath)
+                .RunAsync(CancellationToken.None)).MappedFiles);
+            Assert.True(File.Exists(Path.Combine(dataset, "INE0000000001", "cash", "NSE_X-EQ.parquet")));
+            Assert.False(File.Exists(Path.Combine(pull, "NSE_X-EQ.parquet")));    // consumed
+
+            File.WriteAllLines(Path.Combine(eod2, "isin.csv"),
+                ["ISIN,SYMBOL,SERIES", "INE0000000001,X,EQ"]);
+            Directory.CreateDirectory(Path.Combine(eod2, "daily"));   // File.WriteAllLines does not mkdir
+            File.WriteAllLines(Path.Combine(eod2, "daily", "x.csv"),
+                ["Date,Open,High,Low,Close,Volume,Series", "2026-09-29,100.6,102,100,101,500,EQ"]);
+
+            var command = new ValidateCommand(dataset, eod2, validation,
+                new DateOnly(2017, 7, 3), acceptBaseline: false);
+
+            Assert.Equal(0, await command.RunAsync(CancellationToken.None));  // the folded day matches
+        }
+        finally
+        {
+            Directory.Delete(pull, true); Directory.Delete(dataset, true);
+            Directory.Delete(eod2, true); Directory.Delete(validation, true); Directory.Delete(mapDir, true);
+        }
+    }
+
+    [Fact]
     public async Task End_to_end_on_a_miniature_dataset()
     {
         var dataset = TempDir("ds");

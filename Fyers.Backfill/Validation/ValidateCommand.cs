@@ -1,3 +1,4 @@
+using System.Globalization;
 using Fyers.Backfill.Parquet;
 
 namespace Fyers.Backfill.Validation;
@@ -12,10 +13,33 @@ public sealed class ValidateCommand(
     public async Task<int> RunAsync(CancellationToken ct)
     {
         if (!Directory.Exists(datasetDir) || !Directory.Exists(eod2Dir))
+        {
+            Console.Error.WriteLine($"validate: {DescribeMissing(datasetDir, eod2Dir)} — not validating");
             return 2;   // config/path error (spec §Commands exit codes)
+        }
         Directory.CreateDirectory(validationDir);   // --accept-baseline writes the baseline before any report
 
         var reference = new Eod2Reference(eod2Dir);
+
+        // An empty reference would leave every ISIN of ours "ours_only" — i.e. a
+        // silent all-green. That is the one outcome validate must never produce,
+        // so refuse rather than report against nothing.
+        if (reference.Stems.Count == 0 || reference.StemToIsin.Count == 0)
+        {
+            Console.Error.WriteLine(
+                $"validate: eod2 reference at {eod2Dir} has no daily files or no ISIN map — " +
+                "not validating; refusing to report green");
+            return 2;
+        }
+
+        // A stale reference is still worth comparing against, but say so: the
+        // missing days it reports may just be days the reference never saw.
+        if (reference.LastUpdateUtc is { } updated && IsStale(updated))
+            Console.Error.WriteLine(
+                "validate: eod2 reference last updated " +
+                $"{updated.ToString("yyyy-MM-dd HH':'mm", CultureInfo.InvariantCulture)} UTC — " +
+                "it may be stale; results compare against a frozen reference");
+
         var known = KnownIssues.Load(Path.Combine(validationDir, "known_issues.csv"));
         var cache = new AggregationCache(validationDir);
 
@@ -67,8 +91,31 @@ public sealed class ValidateCommand(
         return ReportWriter.Write(validationDir, TodayIst(), result, reference.LastUpdateUtc);
     }
 
-    private static DateOnly TodayIst() => DateOnly.FromDateTime(
-        TimeZoneInfo.ConvertTimeBySystemTimeZoneId(DateTime.UtcNow, "Asia/Kolkata"));
+    private static DateOnly TodayIst() => IstDate(DateTime.UtcNow);
+
+    private static DateOnly IstDate(DateTime utc) => DateOnly.FromDateTime(
+        TimeZoneInfo.ConvertTimeBySystemTimeZoneId(utc, "Asia/Kolkata"));
+
+    /// <summary>More than four IST calendar days behind. Four rides out the
+    /// longest weekend gap; anything older means the eod2 pull has stopped and
+    /// the comparison is against a frozen reference. Comparing calendar days (not
+    /// a 96-hour span) keeps the answer stable across the day a run happens on.</summary>
+    private static bool IsStale(DateTime lastUpdateUtc) =>
+        TodayIst().DayNumber - IstDate(lastUpdateUtc).DayNumber > 4;
+
+    /// <summary>Which input tree is absent, so the exit-2 line is actionable —
+    /// a mistyped <c>--dataset</c>/<c>--eod2</c> must be diagnosable from the log.</summary>
+    private static string DescribeMissing(string datasetDir, string eod2Dir)
+    {
+        var hasDataset = Directory.Exists(datasetDir);
+        var hasEod2 = Directory.Exists(eod2Dir);
+        return (hasDataset, hasEod2) switch
+        {
+            (false, false) => $"dataset '{datasetDir}' and eod2 '{eod2Dir}' are both missing",
+            (false, true) => $"dataset dir '{datasetDir}' is missing",
+            _ => $"eod2 dir '{eod2Dir}' is missing",
+        };
+    }
 
     /// <summary>Every cash parquet: <c>&lt;dataset&gt;/&lt;ISIN&gt;/cash/*.parquet</code>,
     /// ISIN taken from the directory name (self-healing — no stale manifest). Files
@@ -89,6 +136,8 @@ public sealed class ValidateCommand(
         }
         return sources.OrderBy(s => s.Isin, StringComparer.Ordinal)
             .ThenBy(SeriesKey, StringComparer.Ordinal)                 // EQ first: wins a co-traded date
+            // A rename pair (NSE_EXCEL-EQ + NSE_LANDSMILL-EQ → one ISIN) ties on
+            // SeriesKey too; Path order breaks the tie — deterministic, arbitrary.
             .ThenBy(s => s.Path, StringComparer.Ordinal)
             .ToList();
     }

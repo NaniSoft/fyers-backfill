@@ -188,6 +188,30 @@ public sealed class AggregationCacheTests
         }
         finally { Directory.Delete(dir, true); }
     }
+
+    [Fact]
+    public void Corrupt_state_json_degrades_to_a_full_rebuild()
+    {
+        var dir = TempDir();
+        try
+        {
+            var file = Path.Combine(dir, "INE000TEST000.parquet");
+            File.WriteAllBytes(file, [1, 2, 3]);
+            var cache = new AggregationCache(dir);
+            cache.WriteIsin(IsinSource.Of("INE000TEST000", file), Bars());
+            Assert.True(cache.IsCurrent(IsinSource.Of("INE000TEST000", file)));
+
+            File.WriteAllText(Path.Combine(dir, "state.json"), "this is not json");
+
+            // A fresh instance has to read the corrupt file: no throw, the
+            // fingerprints are gone (so every file re-aggregates) and the
+            // still-present cache parquet stays readable.
+            var reloaded = new AggregationCache(dir);
+            Assert.False(reloaded.IsCurrent(IsinSource.Of("INE000TEST000", file)));
+            Assert.Equal(Bars(), reloaded.ReadIsin(IsinSource.Of("INE000TEST000", file)));
+        }
+        finally { Directory.Delete(dir, true); }
+    }
 }
 
 public sealed class Eod2ReferenceTests
