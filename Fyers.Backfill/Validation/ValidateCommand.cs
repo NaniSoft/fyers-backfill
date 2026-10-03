@@ -1,0 +1,156 @@
+using System.Globalization;
+using Fyers.Backfill.Parquet;
+
+namespace Fyers.Backfill.Validation;
+
+/// <summary>The offline `validate` command (spec §Commands): aggregate ours to
+/// daily bars incrementally, compare against eod2, write the dated report.
+/// Never touches Fyers — no token involved.</summary>
+public sealed class ValidateCommand(
+    string datasetDir, string eod2Dir, string validationDir,
+    DateOnly floor, bool acceptBaseline)
+{
+    public async Task<int> RunAsync(CancellationToken ct)
+    {
+        if (!Directory.Exists(datasetDir) || !Directory.Exists(eod2Dir))
+        {
+            Console.Error.WriteLine($"validate: {DescribeMissing(datasetDir, eod2Dir)} — not validating");
+            return 2;   // config/path error (spec §Commands exit codes)
+        }
+        Directory.CreateDirectory(validationDir);   // --accept-baseline writes the baseline before any report
+
+        var reference = new Eod2Reference(eod2Dir);
+
+        // An empty reference would leave every ISIN of ours "ours_only" — i.e. a
+        // silent all-green. That is the one outcome validate must never produce,
+        // so refuse rather than report against nothing.
+        if (reference.Stems.Count == 0 || reference.StemToIsin.Count == 0)
+        {
+            Console.Error.WriteLine(
+                $"validate: eod2 reference at {eod2Dir} has no daily files or no ISIN map — " +
+                "not validating; refusing to report green");
+            return 2;
+        }
+
+        // A stale reference is still worth comparing against, but say so: the
+        // missing days it reports may just be days the reference never saw.
+        if (reference.LastUpdateUtc is { } updated && IsStale(updated))
+            Console.Error.WriteLine(
+                "validate: eod2 reference last updated " +
+                $"{updated.ToString("yyyy-MM-dd HH':'mm", CultureInfo.InvariantCulture)} UTC — " +
+                "it may be stale; results compare against a frozen reference");
+
+        var known = KnownIssues.Load(Path.Combine(validationDir, "known_issues.csv"));
+        var cache = new AggregationCache(validationDir);
+
+        var oursByIsin = new Dictionary<string, List<DailyBar>>();
+        var fileBars = new Dictionary<string, List<List<DailyBar>>>();
+        foreach (var src in DiscoverCashSources(datasetDir))
+        {
+            List<DailyBar> bars;
+            if (cache.IsCurrent(src))
+            {
+                bars = cache.ReadIsin(src);
+            }
+            else
+            {
+                bars = DailyAggregator.Aggregate(await CandleStore.ReadAsync(src.Path, ct));
+                cache.WriteIsin(src, bars);
+            }
+            if (bars.Count == 0) continue;
+            if (!fileBars.TryGetValue(src.Isin, out var lists))
+                fileBars[src.Isin] = lists = [];
+            lists.Add(bars);
+        }
+
+        // An ISIN's files are merged in memory every run (only the aggregation is
+        // cached), so a series file added later joins the day it belongs to
+        // instead of overwriting the ISIN's earlier bars.
+        foreach (var (isin, lists) in fileBars)
+            oursByIsin[isin] = lists.Count == 1 ? lists[0] : DailyAggregator.MergeFiles(lists);
+
+        var result = ValidationEngine.Validate(oursByIsin, reference, known,
+            new ValidationOptions(floor));
+
+        // An explicit --accept-baseline always rewrites the baseline under the
+        // current scheme — that is what migrates a legacy per-date file to
+        // ISIN-level tolerance rows even when nothing new fired.
+        if (acceptBaseline)
+        {
+            known.Accept(result.NewAnomalies);
+            known.Save(Path.Combine(validationDir, "known_issues.csv"));
+            Console.WriteLine(
+                $"validate: {result.NewAnomalies.Count} new anomalies accepted into the baseline " +
+                $"({known.Count} known rows now)");
+            return 0;
+        }
+
+        Console.WriteLine(
+            $"validate: {result.NewAnomalies.Count} new anomalies, {result.BaselineCount} baselined diffs, " +
+            $"{result.ExtraDayCount} extra days");
+        return ReportWriter.Write(validationDir, TodayIst(), result, reference.LastUpdateUtc);
+    }
+
+    private static DateOnly TodayIst() => IstDate(DateTime.UtcNow);
+
+    private static DateOnly IstDate(DateTime utc) => DateOnly.FromDateTime(
+        TimeZoneInfo.ConvertTimeBySystemTimeZoneId(utc, "Asia/Kolkata"));
+
+    /// <summary>More than four IST calendar days behind. Four rides out the
+    /// longest weekend gap; anything older means the eod2 pull has stopped and
+    /// the comparison is against a frozen reference. Comparing calendar days (not
+    /// a 96-hour span) keeps the answer stable across the day a run happens on.</summary>
+    private static bool IsStale(DateTime lastUpdateUtc) =>
+        TodayIst().DayNumber - IstDate(lastUpdateUtc).DayNumber > 4;
+
+    /// <summary>Which input tree is absent, so the exit-2 line is actionable —
+    /// a mistyped <c>--dataset</c>/<c>--eod2</c> must be diagnosable from the log.</summary>
+    private static string DescribeMissing(string datasetDir, string eod2Dir)
+    {
+        var hasDataset = Directory.Exists(datasetDir);
+        var hasEod2 = Directory.Exists(eod2Dir);
+        return (hasDataset, hasEod2) switch
+        {
+            (false, false) => $"dataset '{datasetDir}' and eod2 '{eod2Dir}' are both missing",
+            (false, true) => $"dataset dir '{datasetDir}' is missing",
+            _ => $"eod2 dir '{eod2Dir}' is missing",
+        };
+    }
+
+    /// <summary>Every cash parquet: <c>&lt;dataset&gt;/&lt;ISIN&gt;/cash/*.parquet</code>,
+    /// ISIN taken from the directory name (self-healing — no stale manifest). Files
+    /// of one ISIN are grouped together and ordered EQ first, then by name, so the
+    /// merge is deterministic and never depends on directory order.</summary>
+    public static IReadOnlyList<IsinSource> DiscoverCashSources(string datasetDir)
+    {
+        if (!Directory.Exists(datasetDir)) return [];
+        var sources = new List<IsinSource>(3_000);
+        foreach (var isinDir in Directory.EnumerateDirectories(datasetDir))
+        {
+            var isin = Path.GetFileName(isinDir);
+            if (isin.StartsWith('_')) continue;                       // _INDEX, _masters, …
+            var cash = Path.Combine(isinDir, "cash");
+            if (!Directory.Exists(cash)) continue;
+            foreach (var f in Directory.EnumerateFiles(cash, "*.parquet"))
+                sources.Add(IsinSource.Of(isin, f));
+        }
+        return sources.OrderBy(s => s.Isin, StringComparer.Ordinal)
+            .ThenBy(SeriesKey, StringComparer.Ordinal)                 // EQ first: wins a co-traded date
+            // A rename pair (NSE_EXCEL-EQ + NSE_LANDSMILL-EQ → one ISIN) ties on
+            // SeriesKey too; Path order breaks the tie — deterministic, arbitrary.
+            .ThenBy(s => s.Path, StringComparer.Ordinal)
+            .ToList();
+    }
+
+    /// <summary>Sort key ordering an ISIN's files EQ first — the EQ bar is the one
+    /// <see cref="DailyAggregator.MergeFiles"/> keeps for a co-traded date, just as
+    /// the reference side dedupes duplicate dates EQ-first — and every other series
+    /// after it by name: "" sorts before any series name, so EQ maps to "".</summary>
+    private static string SeriesKey(IsinSource s)
+    {
+        var stem = Path.GetFileNameWithoutExtension(s.Path);
+        var dash = stem.LastIndexOf('-');
+        var series = dash >= 0 ? stem[(dash + 1)..] : "";
+        return series == "EQ" ? "" : series;
+    }
+}

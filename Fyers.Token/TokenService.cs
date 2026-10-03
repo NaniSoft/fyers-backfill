@@ -275,9 +275,26 @@ public sealed class TokenService
         }
         var url = NewLoginUrl();
         var sent = await NotifyAsync(PromptTemplate.Replace("{url}", url), "warn");
+        if (!sent && !TelegramConfigured)
+        {
+            // No Telegram configured: the console log IS the delivery channel.
+            // Print the URL and treat it as delivered — otherwise the 60s tick
+            // rotates the pending state and the printed link dies before the
+            // click (observed live 2026-10-02: a hand-built URL 400'd on state
+            // mismatch for exactly this reason).
+            _log.LogInformation("fyers login URL: {Url}", url);
+            sent = true;
+        }
         if (sent) _lastPromptAt = now;
         return sent;
     }
+
+    /// <summary>True when Telegram delivery is configured at all — mirrors
+    /// <see cref="TelegramNotifier.Enabled"/>. A notify failure with Telegram
+    /// configured means "retry soon"; with nothing configured, the console
+    /// log is the channel instead.</summary>
+    private bool TelegramConfigured =>
+        _cfg.TelegramBotToken.Length > 0 && _cfg.TelegramChatId.Length > 0;
 
     private void ClearSignal()
     {

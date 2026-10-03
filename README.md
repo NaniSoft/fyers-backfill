@@ -93,6 +93,8 @@ docker run --rm -v "$SHARE":/data --env-file .env fyers-backfill:local \
 | `backfill` | full resumable sweep |
 | `update` | newest window per instrument (the daily increment) |
 | `status` | ledger + dataset summary, plus the failures count |
+| `validate` | compare data/ against eod2_data/ and report new anomalies (offline) |
+| `daily` | token check → update → organize → validate (the daily increment) |
 
 ### Options
 
@@ -105,6 +107,9 @@ docker run --rm -v "$SHARE":/data --env-file .env fyers-backfill:local \
 | `--env PATH` | `<repo>/.env` | credentials |
 | `--data-dir PATH` | `<repo>/data` | where `fyers_access_token.json` lives |
 | `--pilot N` | 5 | instrument count for `pilot` |
+| `--dataset PATH` | `<repo>/data` | ISIN dataset `validate` reads |
+| `--eod2 PATH` | `<repo>/eod2_data` | eod2 reference dir `validate` compares against |
+| `--accept-baseline` | off | absorb today's anomalies into the known-issues baseline (first run) |
 
 ## Configuration
 
@@ -155,6 +160,24 @@ master only lists the current ticker, so a stock that traded as `RUCHI` until
 2022-07-12 had no history at all under `PATANJALI`. `historical_equities` adds
 every former ticker from `isin_symbol_map.json`, each bounded to its own era, so
 it costs a handful of requests per name instead of a full sweep.
+
+## Daily validation
+
+`validate` aggregates `data/` to daily bars (incrementally cached under
+`data/_validation/cache/`) and compares every ISIN against `eod2_data/daily/`:
+open/high/low to the tick, close within 0.5% (last-minute close vs official),
+volume within 1%. Missing days count only when the reference shows volume.
+The first run needs `--accept-baseline` to absorb the known permanent gaps;
+after that, `validate` reports only what is new (exit 1 = new anomalies,
+0 = clean, 2 = config/auth, or an eod2 reference with no daily files / no ISIN
+map — a broken reference never reports green). `daily` chains the token check,
+the `update` pull, the organize-into-`data/` pass, and `validate` in one
+resumable run.
+
+`data/1min/` is a staging buffer, not an archive: `daily` folds each cash file
+into `data/<ISIN>/cash/` and deletes it from staging, so the ISIN dataset cannot
+be rebuilt from what `1min/` holds afterwards. F&O files accumulate in `1min/`
+by design — nothing maps them yet, and validation is cash-only.
 
 ## How it stays within Fyers' limits
 
