@@ -38,7 +38,8 @@ def parse_symbol(fname):
 
 
 def merge_into(dst, src):
-    """Merge-on-write by ts_utc, pull wins (same rule as the .NET Organizer)."""
+    """Merge-on-write by ts_utc, pull wins (same rule as the .NET Organizer).
+    The staging source is consumed — leaving it would double every later run."""
     def rows(path):
         t = pq.read_table(path).to_pylist()
         return {r["ts_utc"]: r for r in t}
@@ -49,6 +50,7 @@ def merge_into(dst, src):
     table = pa_table([merged[k] for k in keys])
     pq.write_table(table, dst + ".tmp", compression="zstd")
     os.replace(dst + ".tmp", dst)
+    os.remove(src)
 
 
 def pa_table(rows):
