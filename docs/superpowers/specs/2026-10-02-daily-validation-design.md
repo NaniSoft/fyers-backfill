@@ -136,6 +136,13 @@ whole-ISIN kinds such as `split_factor`).
   0.5% on 27.7% of compared ISIN-days in the first full run — so per-date keys
   would re-alarm daily forever. A new ISIN firing still alarms; every other
   kind keeps its per-date key.
+  Hand-editing is therefore per-ISIN for these two kinds, not per-row: loading
+  lifts each dated `close`/`volume` row to a date-less `kind,isin,` alias, so
+  deleting one dated row re-flags nothing, and a hand-added dated row (or one
+  with a typo'd date, which parses as no date) silences the whole ISIN. To
+  re-flag an ISIN's close/volume, delete both its dated rows and its
+  `kind,isin,` alias — in practice, every row of that kind whose second field
+  is the ISIN.
 
 ## Reports
 

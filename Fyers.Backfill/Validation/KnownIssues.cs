@@ -5,7 +5,14 @@ namespace Fyers.Backfill.Validation;
 /// <summary>The known-issues baseline (spec §Known-issues baseline):
 /// <c>kind,isin,date,note</c> CSV. Rows here are accepted defects (the
 /// permanent Fyers gaps, split factors, …) and are subtracted from every
-/// report. Hand-editable — delete a row to start flagging it again.</summary>
+/// report. Hand-editable — delete a row to start flagging it again.
+/// EXCEPT for <c>close</c>/<c>volume</c>, where the effective accept is
+/// ISIN-level: <see cref="Load"/> lifts every dated row to a date-less
+/// <c>kind,isin,</c> alias, so removing one dated row re-flags nothing and a
+/// hand-added one (or one with a typo'd date, which parses as no date)
+/// silences the whole ISIN. To re-flag an ISIN's close/volume, delete BOTH
+/// its dated rows and its <c>close,&lt;ISIN&gt;,</c> alias — or simply delete
+/// every row whose kind is close/volume and whose second field is that ISIN.</summary>
 public sealed class KnownIssues
 {
     private readonly HashSet<(string Kind, string Isin, DateOnly? Date)> _rows = [];
@@ -57,6 +64,8 @@ public sealed class KnownIssues
             .ThenBy(r => r.Isin, StringComparer.Ordinal)
             .ThenBy(r => r.Date)
             .Select(r => $"{r.Kind},{r.Isin},{r.Date?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) ?? ""},"));
-        File.WriteAllLines(path, lines);
+        var tmp = path + ".tmp";
+        File.WriteAllLines(tmp, lines);
+        File.Move(tmp, path, overwrite: true);
     }
 }

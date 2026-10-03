@@ -323,6 +323,29 @@ public sealed class KnownIssuesTests
         }
         finally { File.Delete(path); }
     }
+
+    [Fact]
+    public void Legacy_per_date_close_rows_lift_to_isin_level_on_load()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "fb-ki-" + Guid.NewGuid().ToString("N")[..8] + ".csv");
+        try
+        {
+            File.WriteAllLines(path,
+            [
+                "kind,isin,date,note",
+                "close,INE1,2026-09-28,",
+                "missing_day,INE1,2026-09-28,",
+            ]);
+
+            var issues = KnownIssues.Load(path);
+
+            Assert.True(issues.Contains(new Anomaly("close", "INE1", new DateOnly(2026, 10, 5), 1, 1, "")),
+                "the legacy close row lifts to an ISIN-level accept");
+            Assert.False(issues.Contains(new Anomaly("missing_day", "INE1", new DateOnly(2026, 10, 5), null, null, "")),
+                "non-tolerance kinds do not lift");
+        }
+        finally { File.Delete(path); }
+    }
 }
 
 public sealed class ValidationRulesTests
