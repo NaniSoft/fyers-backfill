@@ -129,6 +129,13 @@ whole-ISIN kinds such as `split_factor`).
 - Later runs subtract baseline rows before reporting; baseline items appear
   only as counts in the report header.
 - The file is hand-editable: delete a row to start flagging it again.
+- *Amendment (2026-10-03, live-data driven, approved by owner):* `close` and
+  `volume` anomalies are accepted at **ISIN level** (`kind, isin,` no date).
+  These two kinds are definitional (last-minute close vs official close;
+  ~0.2% feed shortfall) and re-fire on every new trading day — close exceeded
+  0.5% on 27.7% of compared ISIN-days in the first full run — so per-date keys
+  would re-alarm daily forever. A new ISIN firing still alarms; every other
+  kind keeps its per-date key.
 
 ## Reports
 
