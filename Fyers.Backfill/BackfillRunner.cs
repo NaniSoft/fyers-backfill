@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 using Fyers.Backfill.Config;
 using Fyers.Backfill.Failures;
 using Fyers.Backfill.Instruments;
@@ -57,6 +58,12 @@ public sealed class BackfillRunner(
 
     private readonly Func<DateTime> _clock = clock ?? (() => DateTime.UtcNow);
 
+    /// <summary>
+    /// Tickers Fyers no longer serves in any series, loaded from the ledger and
+    /// extended as runs discover them. See the skip in <see cref="RunAsync"/>.
+    /// </summary>
+    private readonly HashSet<string> _dead = new(StringComparer.Ordinal);
+
     public async Task<RunReport> RunAsync(RunMode mode, int pilotCount, CancellationToken ct)
     {
         var sw = Stopwatch.StartNew();
@@ -79,12 +86,30 @@ public sealed class BackfillRunner(
         var authExpired = false;
         var budgetExhausted = false;
 
+        // Tickers Fyers no longer serves at all (renamed away and delisted). The
+        // first "Invalid symbol" costs two requests; without this the remaining
+        // ~19 windows of that ticker would each cost two more, and the historical
+        // pass measured 74% of its requests going to tickers that can never answer.
+        var dead = _dead;
+        dead.Clear();
+        foreach (var s in LoadDead()) dead.Add(s);
+
         foreach (var item in work)
         {
             ct.ThrowIfCancellationRequested();
 
             if (ledger.IsDone(item.Key))
             {
+                skipped++;
+                continue;
+            }
+
+            if (dead.Contains(item.Instrument.Symbol))
+            {
+                // Deliberately NOT marked failed: a retired ticker is not a failure,
+                // it is a ticker that will never answer, and the dead set is what
+                // keeps it from being retried. Marking it would bury real failures
+                // (16,846 of these swamped the genuine error count).
                 skipped++;
                 continue;
             }
@@ -99,15 +124,17 @@ public sealed class BackfillRunner(
 
             try
             {
-                var (bars, used) = await FetchAsync(item, ct);
+                var (bars, used, effective) = await FetchAsync(item, ct);
                 requests += used;
-                var total = await store.MergeWriteAsync(item.Instrument, item.Resolution, bars, ct);
+                var total = cfg.PartFiles
+                    ? await store.WritePartAsync(effective, item.Resolution, item.From, item.To, bars, ct)
+                    : await store.MergeWriteAsync(effective, item.Resolution, bars, ct);
                 ledger.MarkDone(item, bars.Count, used);
                 completed++;
                 rows += bars.Count;
                 log.LogInformation(
                     "backfill: {Symbol} {Res} {From}..{To} -> {Bars} bars ({Total} in partition)",
-                    item.Instrument.Symbol, item.Resolution, item.From, item.To, bars.Count, total);
+                    effective.Symbol, item.Resolution, item.From, item.To, bars.Count, total);
             }
             catch (AuthExpiredException e)
             {
@@ -134,6 +161,9 @@ public sealed class BackfillRunner(
         log.LogInformation(
             "backfill done: completed={Completed} skipped={Skipped} failed={Failed} requests={Requests} rows={Rows} ({Elapsed:F0}s)",
             completed, skipped, failed, requests, rows, sw.Elapsed.TotalSeconds);
+        var (dropped, clamped, volFixed) = CandleSanitizer.Counters;
+        if (dropped + clamped + volFixed > 0)
+            log.LogInformation("backfill: {Sanitizer}", CandleSanitizer.Stats());
 
         return new RunReport(work.Count, completed, skipped, failed, requests, rows,
             authExpired, budgetExhausted, sw.Elapsed);
@@ -142,9 +172,13 @@ public sealed class BackfillRunner(
     /// <summary>
     /// Fetch one window, retrying while the limiter drains the minute. Expired
     /// contracts go through the expired endpoints; everything else through
-    /// <c>/data/history</c>. Returns the bars and the request count consumed.
+    /// <c>/data/history</c>. When an equity is not served in the <c>-EQ</c> series
+    /// (Fyers returns "Invalid symbol" — the ticker trades trade-for-trade), it
+    /// falls back to <c>-BE</c> and returns the effective instrument so the row
+    /// lands under the real symbol. Returns bars, requests consumed, instrument.
     /// </summary>
-    private async Task<(IReadOnlyList<CandleRow> Bars, int Requests)> FetchAsync(WorkItem item, CancellationToken ct)
+    private async Task<(IReadOnlyList<CandleRow> Bars, int Requests, Instrument Instrument)> FetchAsync(
+        WorkItem item, CancellationToken ct)
     {
         var inst = item.Instrument;
         var attempts = 0;
@@ -159,7 +193,7 @@ public sealed class BackfillRunner(
                     : client.History(inst.Symbol, item.From, item.To,
                         oiFlag: cfg.IncludeOi && inst.WantsOi, contFlag: inst.WantsCont,
                         resolution: item.Resolution, ct);
-                return (bars, attempts);
+                return (bars, attempts, inst);
             }
             catch (RateLimitedException e) when (attempts < MaxRateLimitRetries)
             {
@@ -167,8 +201,59 @@ public sealed class BackfillRunner(
                     inst.Symbol, RateLimitBackoff.TotalSeconds, e.Message);
                 await Task.Delay(RateLimitBackoff, ct);
             }
+            catch (InvalidOperationException e)
+                when (inst.Kind == Instrument.KindEquity
+                      && inst.Symbol.EndsWith("-EQ", StringComparison.Ordinal)
+                      && e.Message.Contains("Invalid symbol", StringComparison.OrdinalIgnoreCase))
+            {
+                // EQ series not served for this ticker (it trades in BE / T2T).
+                var be = inst with { Symbol = inst.Symbol[..^"-EQ".Length] + "-BE" };
+                log.LogInformation("backfill: {Eq} not served as EQ — retrying as {Be}", inst.Symbol, be.Symbol);
+                try
+                {
+                    var bars = client.History(be.Symbol, item.From, item.To,
+                        oiFlag: false, contFlag: false, resolution: item.Resolution, ct);
+                    return (bars, attempts + 1, be);
+                }
+                catch (InvalidOperationException bex)
+                    when (bex.Message.Contains("Invalid symbol", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Neither -EQ nor -BE is served: the ticker is gone (renamed away
+                    // and delisted). Retire it for this and every later run.
+                    if (_dead.Add(inst.Symbol))
+                    {
+                        log.LogWarning("backfill: {Symbol} is not served in any series — "
+                                       + "retiring it ({Count} tickers so far)", inst.Symbol, _dead.Count);
+                        SaveDead(_dead);
+                    }
+                    throw;
+                }
+            }
         }
     }
+
+    private const string DeadMetaKey = "dead_symbols";
+
+    private IEnumerable<string> LoadDead()
+    {
+        var raw = ledger.GetMeta(DeadMetaKey);
+        if (string.IsNullOrWhiteSpace(raw))
+            return new HashSet<string>(StringComparer.Ordinal);
+        try
+        {
+            var list = JsonSerializer.Deserialize<List<string>>(raw) ?? [];
+            log.LogInformation("backfill: {Count} tickers already retired as not-served", list.Count);
+            return new HashSet<string>(list, StringComparer.Ordinal);
+        }
+        catch (Exception e)
+        {
+            log.LogWarning("backfill: retired-ticker list unreadable, starting empty: {Message}", e.Message);
+            return new HashSet<string>(StringComparer.Ordinal);
+        }
+    }
+
+    private void SaveDead(HashSet<string> dead)
+        => ledger.SetMeta(DeadMetaKey, JsonSerializer.Serialize(dead.Order(StringComparer.Ordinal)));
 
     /// <summary>Keep only the newest planned window per (instrument, resolution).</summary>
     internal static IReadOnlyList<WorkItem> NewestPerInstrument(IReadOnlyList<WorkItem> planned)
