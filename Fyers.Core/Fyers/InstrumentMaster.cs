@@ -387,6 +387,14 @@ public sealed partial class InstrumentMaster
     /// <summary>NIFTY26SEPFUT -> NIFTY ; NIFTY26SEP24800CE -> NIFTY (python _underlying_of).</summary>
     public static string UnderlyingOf(string sym) => SplitUnderlying(sym).Underlying;
 
+    /// <summary>The bare ticker stem, e.g. <c>NSE:SBIN-EQ</c> -> <c>SBIN</c>.</summary>
+    public static string TickerOf(string sym)
+    {
+        var s = sym.Contains(':') ? sym[(sym.IndexOf(':') + 1)..] : sym;
+        var dash = s.LastIndexOf('-');
+        return dash > 0 ? s[..dash] : s;
+    }
+
     /// <summary>
     /// Splits a master ticker into the python-<c>_underlying_of</c> prefix and the
     /// remainder after it (<c>NSE:RELIANCE26SEPFUT</c> -> <c>RELIANCE</c>, <c>26SEPFUT</c>).

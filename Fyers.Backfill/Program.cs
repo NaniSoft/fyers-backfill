@@ -52,6 +52,10 @@ var cfg = BackfillConfig.Load(configPath, envPath);
 var rootOverride = cli.Root ?? Environment.GetEnvironmentVariable("FYERS_BACKFILL_ROOT");
 if (rootOverride is not null)
     cfg = cfg with { Root = rootOverride };
+if (cli.From is { } fromDate)
+    cfg = cfg with { From = fromDate };
+if (cli.To is { } toDate)
+    cfg = cfg with { To = toDate };
 
 using var loggerFactory = LoggerFactory.Create(b =>
 {
@@ -69,6 +73,9 @@ if (cli.Command == "login")
 
 if (cli.Command == "status")
     return Status(cfg, log);
+
+if (cli.Command == "compact")
+    return await CompactAsync(cfg, log);
 
 // Everything below needs a live token.
 var tokenFile = new TokenFile(tokenPath);
@@ -231,6 +238,33 @@ static int Status(BackfillConfig cfg, ILogger log)
     return 0;
 }
 
+/// <summary>Fold every symbol's part files into its single merged parquet file.</summary>
+static async Task<int> CompactAsync(BackfillConfig cfg, ILogger log)
+{
+    var partsRoot = Path.Combine(cfg.Root, "_parts");
+    if (!Directory.Exists(partsRoot))
+    {
+        log.LogInformation("compact: no part files under {Root}", partsRoot);
+        return 0;
+    }
+
+    var store = new CandleStore(cfg.Root);
+    var symbols = 0;
+    long rows = 0;
+    foreach (var resDir in Directory.GetDirectories(partsRoot))
+    {
+        foreach (var symDir in Directory.GetDirectories(resDir))
+        {
+            rows += await store.CompactSymbolDirAsync(symDir, CancellationToken.None);
+            symbols++;
+            if (symbols % 250 == 0)
+                log.LogInformation("compact: {Symbols} symbols folded, {Rows} rows", symbols, rows);
+        }
+    }
+    log.LogInformation("compact done: {Symbols} symbols, {Rows} rows", symbols, rows);
+    return 0;
+}
+
 /// <summary>NSE continuous session (09:15–15:30 IST, Mon–Fri). Holidays are not
 /// modelled here: a holiday simply wastes no requests because the window returns
 /// no data.</summary>
@@ -258,6 +292,8 @@ internal sealed record Cli(
     string? DataDir,
     string? RepoRoot,
     string? Root,
+    DateOnly? From,
+    DateOnly? To,
     int PilotCount)
 {
     public const string Usage = """
@@ -270,6 +306,7 @@ internal sealed record Cli(
           backfill              Full resumable sweep
           update                Newest window per instrument (daily increment)
           status                Ledger + dataset summary
+          compact               Fold _parts/* part files into the per-symbol file
 
         Options:
           --config PATH         config.yaml (default <repo>/config.yaml)
@@ -277,11 +314,15 @@ internal sealed record Cli(
           --data-dir PATH       where fyers_access_token.json lives (default <repo>/data)
           --repo-root PATH      repo root used for the defaults above
           --root PATH           dataset root / file share (overrides backfill.root)
+          --from YYYY-MM-DD     override the start date (e.g. 2026-09-01)
+          --to YYYY-MM-DD       override the end date (e.g. 2026-09-24)
+          --pilot N             instrument count for the pilot command
         """;
 
     public static Cli Parse(string[] args)
     {
         string? command = null, config = null, env = null, dataDir = null, repoRoot = null, root = null;
+        DateOnly? from = null, to = null;
         var pilot = 5;
 
         for (var i = 0; i < args.Length; i++)
@@ -300,6 +341,8 @@ internal sealed record Cli(
                 case "--data-dir": dataDir = Value(); break;
                 case "--repo-root": repoRoot = Value(); break;
                 case "--root": root = Value(); break;
+                case "--from": from = ParseDate(Value(), "--from"); break;
+                case "--to": to = ParseDate(Value(), "--to"); break;
                 case "--pilot":
                     pilot = int.Parse(Value(), System.Globalization.CultureInfo.InvariantCulture);
                     break;
@@ -311,6 +354,12 @@ internal sealed record Cli(
             }
         }
 
-        return new Cli(command, config, env, dataDir, repoRoot, root, pilot);
+        return new Cli(command, config, env, dataDir, repoRoot, root, from, to, pilot);
     }
+
+    private static DateOnly ParseDate(string raw, string flag)
+        => DateOnly.TryParseExact(raw, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.None, out var d)
+            ? d
+            : throw new ArgumentException($"{flag} must be yyyy-MM-dd (got '{raw}')");
 }

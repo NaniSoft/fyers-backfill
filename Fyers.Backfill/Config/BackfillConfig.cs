@@ -33,6 +33,14 @@ public sealed record BackfillConfig
     /// <summary>Request oi_flag/include_oi for derivatives.</summary>
     public bool IncludeOi { get; init; } = true;
 
+    /// <summary>
+    /// Write each window as its own part file under <c>_parts/</c> instead of
+    /// read-merge-rewriting the whole symbol file. Much faster for a long
+    /// backward sweep; run the <c>compact</c> pass afterwards to fold parts into
+    /// the single per-symbol file.
+    /// </summary>
+    public bool PartFiles { get; init; }
+
     /// <summary>Max API requests one run may spend (the account pool is 100k/day).</summary>
     public int DailyBudget { get; init; } = 90_000;
 
@@ -50,8 +58,32 @@ public sealed record BackfillConfig
     public bool UniverseOptions { get; init; } = true;
     public bool UniverseExpired { get; init; } = true;
 
+    /// <summary>
+    /// Include EXPIRED options. Default false and effectively unusable: Fyers
+    /// returns no_data for expired option history (live-verified 2026-09-25), so
+    /// enabling this only burns requests.
+    /// </summary>
+    public bool UniverseExpiredOptions { get; init; }
+
     /// <summary>Optional whitelist of underlyings (bare stems). Empty = every underlying.</summary>
     public IReadOnlyList<string> Underlyings { get; init; } = [];
+
+    /// <summary>
+    /// Also request the <em>historical</em> tickers of every equity that has changed
+    /// name. The NSE_CM master only lists the current ticker, so a stock that traded
+    /// as <c>RUCHI</c> until 2022-07-12 and as <c>PATANJALI</c> after would otherwise
+    /// have no history at all before the rename. The names come from the shared
+    /// <c>isin_symbol_map.json</c> (<c>isin2hist</c>), whose entries carry the
+    /// first/last-seen dates. Validation over the pulled set found 298 ISINs with at
+    /// least one entirely-missing era (315 of them inside the 2017-07-03+ window).
+    /// </summary>
+    public bool UniverseHistoricalEquities { get; init; } = true;
+
+    /// <summary>
+    /// Path to the shared <c>isin_symbol_map.json</c> that carries the name history.
+    /// Defaults to <c>&lt;isin_map_dir&gt;/isin_symbol_map.json</c>.
+    /// </summary>
+    public string? HistoricalEquitiesFile { get; init; }
 
     /// <summary>Where symbol masters are cached (default <c>&lt;root&gt;/_masters</c>).</summary>
     public string? MasterCacheDir { get; init; }
@@ -92,6 +124,7 @@ public sealed record BackfillConfig
             ChunkDays = root.Int("chunk_days", 100),
             Resolutions = ListOr(root.StrList("resolutions"), ["1"]),
             IncludeOi = root.Bool("include_oi", true),
+            PartFiles = root.Bool("part_files", false),
             DailyBudget = root.Int("daily_budget", 90_000),
             MaxMinutes = root.Int("max_minutes", 0),
             MarketHoursOnly = root.Bool("market_hours_only", false),
@@ -101,7 +134,11 @@ public sealed record BackfillConfig
             UniverseFutures = universe.Bool("futures", true),
             UniverseOptions = universe.Bool("options", true),
             UniverseExpired = universe.Bool("expired", true),
+            UniverseExpiredOptions = universe.Bool("expired_options", false),
             Underlyings = universe.StrList("underlyings"),
+            UniverseHistoricalEquities = universe.Bool("historical_equities", true),
+            HistoricalEquitiesFile = universe.StrOrNull("historical_equities_file")
+                                      ?? root.StrOrNull("historical_equities_file"),
             MasterCacheDir = root.StrOrNull("master_cache_dir"),
             Env = env,
         };
@@ -144,10 +181,25 @@ internal sealed class Map
 
     public string Str(string key, string def) => StrOrNull(key) ?? def;
 
-    public string? StrOrNull(string key) =>
-        TryGet(key, out var node) && node is YamlScalarNode scalar && !string.IsNullOrEmpty(scalar.Value)
-            ? scalar.Value
-            : null;
+    public string? StrOrNull(string key)
+    {
+        if (!TryGet(key, out var node) || node is not YamlScalarNode scalar)
+            return null;
+        // A YAML null (`to: null`, `to: ~`, `to:`) arrives as a scalar with the
+        // null tag or a null-ish value — treat it as absent, not the string "null".
+        if (IsNullScalar(scalar) || string.IsNullOrEmpty(scalar.Value))
+            return null;
+        return scalar.Value;
+    }
+
+    private static bool IsNullScalar(YamlScalarNode scalar)
+    {
+        if (scalar.Tag.ToString().Contains("null", StringComparison.OrdinalIgnoreCase))
+            return true;
+        var v = scalar.Value;
+        return v is "" or "~"
+               || string.Equals(v, "null", StringComparison.OrdinalIgnoreCase);
+    }
 
     public int Int(string key, int def)
     {

@@ -4,18 +4,23 @@ namespace Fyers.Backfill;
 
 /// <summary>
 /// Reads the shared Fyers token file written by the token service
-/// (<c>{dataDir}/fyers_access_token.json</c>). A token is "fresh" only when its
-/// <c>saved_at</c> IST date is today — Fyers resets access tokens daily at
-/// ~06:00 IST. Mirrors the collector's <c>TokenFileReader</c> so the backfill and
-/// the live collector can share one login.
+/// (<c>{dataDir}/fyers_access_token.json</c>). A token is "fresh" while the wall
+/// clock is before the NEXT <b>06:00 IST</b> after it was saved — Fyers resets
+/// access tokens daily at ~06:00 IST, so a token minted at 23:40 the previous
+/// evening is still valid through the midnight boundary. (Treating "saved on an
+/// earlier calendar day" as stale would needlessly park a backfill that is
+/// running across midnight — observed live 2026-09-25.)
 /// </summary>
 public sealed class TokenFile(string tokenPath)
 {
     private static readonly TimeZoneInfo Ist = ResolveIst();
 
+    /// <summary>Fyers' daily access-token reset (~06:00 IST).</summary>
+    private static readonly TimeSpan DailyReset = TimeSpan.FromHours(6);
+
     public string Path { get; } = tokenPath;
 
-    /// <summary>Today's token, or null when missing/stale/unparsable.</summary>
+    /// <summary>A usable token, or null when missing/stale/unparsable.</summary>
     public string? AccessToken()
     {
         try
@@ -25,17 +30,36 @@ public sealed class TokenFile(string tokenPath)
             using var doc = JsonDocument.Parse(File.ReadAllText(Path));
             var token = doc.RootElement.TryGetProperty("access_token", out var t) ? t.GetString() : null;
             var savedAt = doc.RootElement.TryGetProperty("saved_at", out var sa) ? sa.GetInt64() : 0;
-            var savedIst = TimeZoneInfo.ConvertTimeFromUtc(
-                DateTimeOffset.FromUnixTimeSeconds(savedAt).UtcDateTime, Ist);
-            var todayIst = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, Ist).Date;
-            if (savedIst.Date < todayIst)
+
+            if (!IsFresh(savedAt, DateTime.UtcNow))
                 return null;
+
             return string.IsNullOrEmpty(token) ? null : token;
         }
         catch
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// True while <paramref name="nowUtc"/> is before the next 06:00 IST after
+    /// <paramref name="savedAtEpoch"/>. Pure and injectable so the midnight
+    /// boundary is unit-tested.
+    /// </summary>
+    internal static bool IsFresh(long savedAtEpoch, DateTime nowUtc)
+    {
+        if (savedAtEpoch <= 0)
+            return false;
+
+        var savedIst = TimeZoneInfo.ConvertTimeFromUtc(
+            DateTimeOffset.FromUnixTimeSeconds(savedAtEpoch).UtcDateTime, Ist);
+        var reset = savedIst.Date + DailyReset;
+        if (savedIst.TimeOfDay >= DailyReset)
+            reset = reset.AddDays(1);                 // saved after 06:00 -> valid until tomorrow 06:00
+        var nowIst = TimeZoneInfo.ConvertTimeFromUtc(
+            nowUtc.Kind == DateTimeKind.Utc ? nowUtc : nowUtc.ToUniversalTime(), Ist);
+        return nowIst < reset;
     }
 
     private static TimeZoneInfo ResolveIst()

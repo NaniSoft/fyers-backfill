@@ -36,6 +36,7 @@ public sealed class UniverseBuilder(BackfillConfig cfg, FyersClient client, ILog
     public async Task<IReadOnlyList<Instrument>> BuildAsync(CancellationToken ct)
     {
         var instruments = new List<Instrument>();
+        Directory.CreateDirectory(cfg.MasterCache);
 
         if (cfg.UniverseEquities)
         {
@@ -43,6 +44,16 @@ public sealed class UniverseBuilder(BackfillConfig cfg, FyersClient client, ILog
             instruments.AddRange(MasterScanner.Scan(cmPath, "CM")
                 .Where(i => i.Kind == Instrument.KindEquity));
             log.LogInformation("universe: {Count} cash equities from NSE_CM", instruments.Count);
+            _existingSymbols = instruments.Select(i => i.Symbol).ToHashSet(StringComparer.Ordinal);
+        }
+
+        if (cfg.UniverseEquities && cfg.UniverseHistoricalEquities)
+        {
+            var before = instruments.Count;
+            var historical = HistoricalEquities();
+            instruments.AddRange(historical);
+            log.LogInformation("universe: {Count} historical (renamed) equity tickers from {Path}",
+                instruments.Count - before, HistoricalPath);
         }
 
         if (cfg.UniverseFutures || cfg.UniverseOptions)
@@ -73,6 +84,86 @@ public sealed class UniverseBuilder(BackfillConfig cfg, FyersClient client, ILog
     }
 
     /// <summary>
+    /// The <em>former</em> tickers of equities that have since been renamed, taken
+    /// from the shared <c>isin_symbol_map.json</c> (<c>isin2hist</c>). The NSE_CM
+    /// master only carries the current ticker, so without this a renamed stock has no
+    /// history for the years before the rename — validation found 298 ISINs in exactly
+    /// that state, 8 of them with no data whatsoever.
+    ///
+    /// Each name becomes a normal <c>NSE:&lt;SYMBOL&gt;-EQ</c> instrument; the
+    /// backfill runner's existing <c>-EQ</c>→<c>-BE</c> fallback still applies, and an
+    /// old ticker Fyers no longer serves simply comes back as an error recorded in the
+    /// ledger rather than a silent gap.
+    /// </summary>
+    private IReadOnlyList<Instrument> HistoricalEquities()
+    {
+        if (!File.Exists(HistoricalPath))
+        {
+            log.LogWarning("universe: historical equity map not found at {Path} — "
+                           + "renamed tickers will be missing", HistoricalPath);
+            return [];
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(File.ReadAllText(HistoricalPath));
+            if (!doc.RootElement.TryGetProperty("isin2hist", out var hist))
+                return [];
+
+            var instruments = new List<Instrument>();
+            foreach (var isin in hist.EnumerateObject())
+            {
+                var isinVal = isin.Name;
+                if (isin.Value.ValueKind == JsonValueKind.Object
+                    && isin.Value.TryGetProperty("isin", out var v)
+                    && v.ValueKind == JsonValueKind.String)
+                    isinVal = v.GetString() ?? isin.Name;
+
+                foreach (var era in isin.Value.EnumerateArray())
+                {
+                    if (era.ValueKind != JsonValueKind.Object
+                        || !era.TryGetProperty("symbol", out var sym)
+                        || sym.ValueKind != JsonValueKind.String)
+                        continue;
+                    var ticker = sym.GetString();
+                    if (string.IsNullOrWhiteSpace(ticker) || string.IsNullOrWhiteSpace(isinVal))
+                        continue;
+                    // Bound the work to the era: the ticker did not exist outside it.
+                    instruments.Add(new Instrument($"NSE:{ticker}-EQ", Instrument.KindEquity,
+                        Isin: isinVal, Segment: "CM",
+                        WindowFrom: ParseDate(era, "from_date"),
+                        WindowTo: ParseDate(era, "to_date")));
+                }
+            }
+
+            // The master already covers the current ticker — keep only names we do
+            // not already have, so a rename that is still listed is not pulled twice.
+            var existing = _existingSymbols;
+            return existing is null
+                ? instruments
+                : instruments.Where(i => !existing.Contains(i.Symbol)).ToList();
+        }
+        catch (Exception e)
+        {
+            log.LogWarning("universe: historical equity map unreadable: {Message}", e.Message);
+            return [];
+        }
+    }
+
+    private HashSet<string>? _existingSymbols;
+
+    private static DateOnly? ParseDate(JsonElement era, string name)
+        => era.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String
+           && DateOnly.TryParse(v.GetString(), out var d)
+            ? d
+            : null;
+
+    private string HistoricalPath => cfg.HistoricalEquitiesFile
+        ?? Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            "source", "repos", "trading", "isin", "isin_symbol_map.json");
+
+    /// <summary>
     /// Expired contracts, cached at <c>&lt;master_cache&gt;/expired_universe.json</c>.
     /// Discovery is one <c>expiry-dates</c> call per underlying plus one
     /// <c>underlying-symbols</c> call per expiry — expensive, so the result is
@@ -101,6 +192,7 @@ public sealed class UniverseBuilder(BackfillConfig cfg, FyersClient client, ILog
 
         var stems = await DiscoverStemsAsync(ct);
         var instruments = new List<Instrument>();
+        var futuresCount = 0;
         foreach (var stem in stems)
         {
             ct.ThrowIfCancellationRequested();
@@ -108,18 +200,43 @@ public sealed class UniverseBuilder(BackfillConfig cfg, FyersClient client, ILog
             try
             {
                 var expiries = client.ExpiredExpiryDates(underlyingSymbol, cfg.From, cfg.EndDate, ct);
-                foreach (var expiry in expiries)
+
+                // Futures: expired futures DO have history (live-verified).
+                foreach (var expiry in expiries.Futures)
                 {
                     ct.ThrowIfCancellationRequested();
-                    var expiryDate = DateOnly.FromDateTime(
-                        DateTimeOffset.FromUnixTimeSeconds(expiry).UtcDateTime.AddHours(5.5));
-                    foreach (var symbol in client.ExpiredUnderlyingSymbols(underlyingSymbol, expiryDate, ct))
+                    var contracts = client.ExpiredUnderlyingSymbols(underlyingSymbol, expiry, ct);
+                    foreach (var symbol in contracts.Futures)
                     {
-                        instruments.Add(ClassifyExpired(symbol, stem, expiry));
+                        instruments.Add(new Instrument(symbol, Instrument.KindFuture,
+                            Underlying: stem, ExpiryEpoch: EpochOf(expiry), Segment: "FO", Expired: true));
+                        futuresCount++;
                     }
                 }
-                log.LogInformation("universe: expired {Stem}: {Count} contracts over {Expiries} expiries",
-                    stem, instruments.Count, expiries.Count);
+
+                // Options: expired option history is NOT served by Fyers
+                // (s=no_data, live-verified) — only attempt when explicitly asked.
+                if (cfg.UniverseExpiredOptions)
+                {
+                    foreach (var expiry in expiries.Options)
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        var contracts = client.ExpiredUnderlyingSymbols(underlyingSymbol, expiry, ct);
+                        foreach (var symbol in contracts.Options)
+                        {
+                            var upper = symbol.ToUpperInvariant();
+                            var optType = upper.EndsWith("CE", StringComparison.Ordinal) ? "CE"
+                                : upper.EndsWith("PE", StringComparison.Ordinal) ? "PE" : null;
+                            instruments.Add(new Instrument(symbol, Instrument.KindOption,
+                                Underlying: stem, ExpiryEpoch: EpochOf(expiry),
+                                OptionType: optType, Segment: "FO", Expired: true));
+                        }
+                    }
+                }
+
+                log.LogInformation(
+                    "universe: expired {Stem}: futures expiries={Fut} options expiries={Opt} (running futures total {Total})",
+                    stem, expiries.Futures.Count, expiries.Options.Count, futuresCount);
             }
             catch (AuthExpiredException)
             {
@@ -166,20 +283,9 @@ public sealed class UniverseBuilder(BackfillConfig cfg, FyersClient client, ILog
     public static string UnderlyingSymbol(string stem)
         => IndexSymbols.TryGetValue(stem, out var idx) ? idx : $"NSE:{stem}-EQ";
 
-    /// <summary>
-    /// Classify one expired contract symbol. Fyers option tickers end in CE/PE
-    /// (e.g. <c>NSE:NIFTY26MAR24800CE</c>); everything else is treated as a future.
-    /// </summary>
-    private static Instrument ClassifyExpired(string symbol, string stem, long expiryEpoch)
-    {
-        var upper = symbol.ToUpperInvariant();
-        var optionType = upper.EndsWith("CE", StringComparison.Ordinal) ? "CE"
-            : upper.EndsWith("PE", StringComparison.Ordinal) ? "PE"
-            : null;
-        var kind = optionType is null ? Instrument.KindFuture : Instrument.KindOption;
-        return new Instrument(symbol, kind, Underlying: stem, ExpiryEpoch: expiryEpoch,
-            OptionType: optionType, Segment: "FO", Expired: true);
-    }
+    /// <summary>Expiry date -> epoch seconds at 00:00 UTC (round-trips via Instrument.ExpiryDate).</summary>
+    private static long EpochOf(DateOnly d)
+        => new DateTimeOffset(d.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero).ToUnixTimeSeconds();
 
     private IReadOnlyList<Instrument> ApplyWhitelist(List<Instrument> instruments)
     {
@@ -194,8 +300,8 @@ public sealed class UniverseBuilder(BackfillConfig cfg, FyersClient client, ILog
             // cash equities have no underlying stem — match the ticker prefix
             if (i.Kind == Instrument.KindEquity)
             {
-                var stem = InstrumentMaster.UnderlyingOf(i.Symbol);
-                return allow.Contains(stem);
+                var stem = InstrumentMaster.TickerOf(i.Symbol);
+                return allow.Contains(stem) || allow.Contains(i.Symbol);
             }
             return false;
         }).ToList();

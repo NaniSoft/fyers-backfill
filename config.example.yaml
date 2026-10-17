@@ -240,4 +240,11 @@ backfill:
     options: true             # live options (NSE_FO master)
     expired: true             # expired F&O via /data/history/fno/expired/*
     underlyings: []           # [] = all; else stems, e.g. [NIFTY, BANKNIFTY, RELIANCE]
+    # The NSE_CM master only lists an equity's CURRENT ticker, so a renamed stock
+    # would otherwise have no history before its rename (found: 298 ISINs with at
+    # least one entirely-missing era, 8 with no data at all). When true, every
+    # historical ticker in isin_symbol_map.json is added too, each bounded to the
+    # era's own date range so it costs a handful of requests, not 34.
+    historical_equities: true
+    historical_equities_file: null   # default <user>/source/repos/trading/isin/isin_symbol_map.json
   master_cache_dir: null      # default <root>/_masters
