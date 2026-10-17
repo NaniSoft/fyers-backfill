@@ -22,10 +22,12 @@ public sealed record ExpiredContracts(IReadOnlyList<string> Futures, IReadOnlyLi
 /// historical-data     -> candles[[epoch,o,h,l,c,v(,oi)]]
 /// </code>
 ///
-/// IMPORTANT (live-verified): <b>expired futures return candles; expired options
-/// return s=no_data</b> for every strike/range/flag combination tried. Fyers does
-/// not serve expired option history (it is TrueData-only), so an expired-option
-/// backfill is not possible — callers should request futures only.
+/// IMPORTANT (re-verified 2026-10-06): <b>expired futures AND expired options both
+/// return candles</b> for listed strikes (each contract's payload is distinct), and
+/// <c>s=no_data</c> for a strike that never listed. An earlier live check
+/// (2026-09-25) saw options return <c>no_data</c> across the board; that no longer
+/// holds, so the expired universe should include options — see
+/// <c>BackfillConfig.UniverseExpiredOptions</c>, whose default is now stale.
 /// </summary>
 public sealed partial class FyersClient
 {
@@ -75,8 +77,16 @@ public sealed partial class FyersClient
     }
 
     /// <summary>
-    /// Candles for one expired contract. Live-verified: futures return data,
-    /// options return <c>no_data</c> (empty list, not an error).
+    /// Candles for one expired contract.
+    ///
+    /// Live-verified 2026-10-06 (correcting the earlier note on this type): expired
+    /// <b>futures and options both return candles</b>. <c>NSE:NIFTY24NOVFUT</c>,
+    /// <c>NSE:NIFTY24NOV24500CE</c> and <c>NSE:NIFTY24NOV24500PE</c> each returned
+    /// <c>s=ok</c> with 3,435 candles of genuinely distinct content (distinct
+    /// payload hashes), while a strike that never listed
+    /// (<c>NSE:NIFTY24NOV20000CE</c>) returned <c>s=no_data</c>. The earlier
+    /// "expired options are never served" finding no longer holds, so
+    /// <c>expired_options</c> should be enabled.
     /// </summary>
     public IReadOnlyList<CandleRow> FnoHistoricalData(string symbol, DateOnly from, DateOnly to,
         string resolution = HistoryResolution1Min, bool includeOi = false, bool includeGreeks = false,
@@ -116,13 +126,28 @@ public sealed partial class FyersClient
                 High: NumAt(candle, 2) ?? 0m,
                 Low: NumAt(candle, 3) ?? 0m,
                 Close: NumAt(candle, 4) ?? 0m,
-                Volume: candle.GetArrayLength() > 5 ? NumAt(candle, 5) ?? 0m : 0m));
+                Volume: candle.GetArrayLength() > 5 ? NumAt(candle, 5) ?? 0m : 0m,
+                Oi: candle.GetArrayLength() > 6 ? LongAt(candle, 6) : null));
         }
         CandleSanitizer.Clean(rows);
         return rows;
     }
 
     // ---------------------------------------------------------------- helpers
+
+    /// <summary>
+    /// Nth candle element as a long (the open-interest slot). Null when the element
+    /// is absent, JSON null, or not a whole number — open interest is a contract
+    /// count, so a fractional value is not meaningful and is dropped rather than
+    /// truncated. Reuses <see cref="NumAt"/> so a numeric string is accepted, as the
+    /// rest of the candle parsing does.
+    /// </summary>
+    private static long? LongAt(JsonElement candle, int index)
+    {
+        var d = NumAt(candle, index);
+        if (d is null) return null;
+        return decimal.Truncate(d.Value) == d.Value ? (long)d.Value : null;
+    }
 
     private static string Date(DateOnly d) => d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
 

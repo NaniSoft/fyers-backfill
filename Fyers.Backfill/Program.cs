@@ -4,6 +4,7 @@ using Fyers.Backfill.Failures;
 using Fyers.Backfill.Instruments;
 using Fyers.Backfill.Ledger;
 using Fyers.Backfill.Parquet;
+using Fyers.Backfill.FnoPull;
 using Fyers.Backfill.Validation;
 using Fyers.Core;
 using Fyers.Core.Config;
@@ -23,6 +24,7 @@ using Microsoft.Extensions.Logging;
 //   fyers-backfill backfill              # full sweep (resumable)
 //   fyers-backfill update                # newest window per instrument (daily)
 //   fyers-backfill status                # Ledger + dataset summary
+//   fyers-backfill fno-pull [--max N]    # expired F&O queue, oldest expiry first
 //   fyers-backfill validate              # compare data/ against eod2_data/ (offline)
 //   fyers-backfill daily                 # login-check → update → organize → validate
 //
@@ -114,6 +116,22 @@ var limiter = new RateLimiter(cfg.PerMinute, cfg.PerSecond)
     Warn = m => log.LogWarning("{Message}", m),
 };
 var client = new FyersClient(http, () => tokenFile.AccessToken(), limiter, log, appId: cfg.AppId);
+
+// `fno-pull` drives the expired F&O queue through that same rate-limited client,
+// writing into the existing dataset layout. It deliberately bypasses the
+// universe/planner path: the queue and ledger are the persisted python ones, and
+// resuming from them is what preserves the ~64.5k contracts already on disk.
+if (cli.Command == "fno-pull")
+{
+    var fnoQueue = FnoQueue.Load(Path.Combine(repoRoot, "data", "backfill"));
+    var fnoStore = new FnoStore(repoRoot,
+        FnoStore.LoadSym2Isin(Path.Combine(repoRoot, "eod2_data", "isin_symbol_map.json")));
+    var puller = new FnoPuller(fnoQueue, fnoStore, client, log,
+        dailyBudget: cli.DailyBudget > 0 ? cli.DailyBudget : cfg.DailyBudget,
+        maxContracts: cli.Max);
+    var fnoReport = await puller.RunAsync(CancellationToken.None);
+    return fnoReport.AuthExpired ? 2 : 0;
+}
 
 using var ledger = new ResumeLedger(Path.Combine(cfg.Root, "_ledger.db"));
 var store = new CandleStore(cfg.Root);
@@ -340,7 +358,9 @@ internal sealed record Cli(
     int PilotCount,
     string? Dataset = null,
     string? Eod2 = null,
-    bool AcceptBaseline = false)
+    bool AcceptBaseline = false,
+    int Max = 0,
+    int DailyBudget = 0)
 {
     public const string Usage = """
         fyers-backfill — local NSE historical 1-minute OHLCV backfill (Fyers v3)
@@ -353,6 +373,10 @@ internal sealed record Cli(
           update                Newest window per instrument (daily increment)
           status                Ledger + dataset summary
           compact               Fold _parts/* part files into the per-symbol file
+          fno-pull [--max N] [--daily-budget N]
+                                Pull the expired F&O queue (oldest expiry first)
+                                through the rate-limited client, resuming from
+                                data/backfill/expired_ledger.json
           validate [--accept-baseline]
                                 Compare data/ against eod2_data/ (offline)
           daily                 login-check → update → organize → validate
@@ -366,6 +390,8 @@ internal sealed record Cli(
           --from YYYY-MM-DD     override the start date (e.g. 2026-09-01)
           --to YYYY-MM-DD       override the end date (e.g. 2026-09-24)
           --pilot N             instrument count for the pilot command
+          --max N               fno-pull: stop after N contracts this run
+          --daily-budget N      fno-pull: request ceiling for this run
           --dataset PATH        ISIN dataset (default <repo>/data)
           --eod2 PATH           eod2 reference dir (default <repo>/eod2_data)
           --accept-baseline     write current anomalies to known_issues.csv (first run)
@@ -378,6 +404,8 @@ internal sealed record Cli(
         DateOnly? from = null, to = null;
         var pilot = 5;
         var acceptBaseline = false;
+        var max = 0;
+        var dailyBudget = 0;
 
         for (var i = 0; i < args.Length; i++)
         {
@@ -400,6 +428,12 @@ internal sealed record Cli(
                 case "--pilot":
                     pilot = int.Parse(Value(), System.Globalization.CultureInfo.InvariantCulture);
                     break;
+                case "--max":
+                    max = int.Parse(Value(), System.Globalization.CultureInfo.InvariantCulture);
+                    break;
+                case "--daily-budget":
+                    dailyBudget = int.Parse(Value(), System.Globalization.CultureInfo.InvariantCulture);
+                    break;
                 case "--dataset": dataset = Value(); break;
                 case "--eod2": eod2 = Value(); break;
                 case "--accept-baseline": acceptBaseline = true; break;
@@ -412,7 +446,7 @@ internal sealed record Cli(
         }
 
         return new Cli(command, config, env, dataDir, repoRoot, root, from, to, pilot,
-            dataset, eod2, acceptBaseline);
+            dataset, eod2, acceptBaseline, max, dailyBudget);
     }
 
     private static DateOnly ParseDate(string raw, string flag)

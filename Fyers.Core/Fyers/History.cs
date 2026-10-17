@@ -7,9 +7,13 @@ namespace Fyers.Core.Fyers;
 /// <summary>
 /// One 1-minute OHLCV bar fetched from <c>/data/history</c>. The wire candle is
 /// <c>[epoch, open, high, low, close, volume(, oi)]</c>; this record keeps the
-/// six fields the collector stores (the symbol is attached by the client) and
-/// drops the optional 7th (oi) — python's <c>candle_rows</c> keeps it, this port
-/// does not (see the notes on <see cref="FyersClient.History(string, DateOnly, bool, bool, CancellationToken)"/>).
+/// six fields the collector stores (the symbol is attached by the client) plus the
+/// optional 7th, <c>Oi</c>.
+///
+/// <c>Oi</c> is null unless the request asked for it (<c>oi_flag=1</c> /
+/// <c>include_oi=1</c>) AND the wire row carried the field, so a null here means
+/// "not requested / not supplied", never "zero open interest". The expired-F&amp;O
+/// dataset stores this column, so the expired path populates it.
 /// </summary>
 public sealed record CandleRow(
     string Symbol,
@@ -18,7 +22,8 @@ public sealed record CandleRow(
     decimal High,
     decimal Low,
     decimal Close,
-    decimal Volume);
+    decimal Volume,
+    long? Oi = null);
 
 // NB: FyersClient.cs declares this type `partial` so the history endpoint can live
 // in its own file (this one), mirroring the python layout where src/candles.py is
