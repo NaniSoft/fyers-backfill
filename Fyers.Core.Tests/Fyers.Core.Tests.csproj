@@ -14,7 +14,7 @@
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
     <!-- xUnit v2 has no built-in dynamic skip (Assert.Skip is v3-only); the
          large-fixture parity tests need to skip on a clean checkout. -->
-    <PackageReference Include="Xunit.SkippableFact" Version="1.4.13" />
+    <PackageReference Include="Xunit.SkippableFact" Version="1.5.85" />
   </ItemGroup>
 
   <ItemGroup>
